@@ -202,9 +202,7 @@ The bridge produces JSON structurally identical to the official `.svp` format. T
 
 ```
 HarmonyBridge.lua          # Runtime bridge (starts loop on click, no UI)
-HarmonySettings.lua        # Settings UI (interval, work mode, working dir, session cleanup)
-Test_Loop.lua              # Proof-of-concept file-polling loop
-test_io.lua                # Basic file I/O validation test
+HarmonySettings.lua        # Settings UI (interval, work mode, working dir, session cleanup)\
 LICENSE.txt                # ALE 1.1 + GPL v3.0 dual license
 agents/                    # Development planning documents
 ```
