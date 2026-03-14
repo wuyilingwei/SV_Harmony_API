@@ -1,13 +1,13 @@
--- HormonySettings.lua
--- Hormony API -- Settings UI
--- Persists configuration to Hormony_Config.json in the hormony working directory.
--- The runtime bridge script (HormonyBridge.lua) reads this config on start.
+-- HarmonySettings.lua
+-- Harmony API -- Settings UI
+-- Persists configuration to Harmony_Config.json in the Harmony working directory.
+-- The runtime bridge script (HarmonyBridge.lua) reads this config on start.
 
 local SCRIPT_VERSION = "0.4.0"
 
 function getClientInfo()
   return {
-    name = SV:T("Hormony Settings"),
+    name = SV:T("Harmony Settings"),
     author = "Wuyilingwei",
     versionNumber = 1,
     minEditorVersion = 65537
@@ -17,7 +17,7 @@ end
 function getTranslations(langCode)
   if langCode == "zh-cn" then
     return {
-      {"Hormony Settings", "Hormony 设置"},
+      {"Harmony Settings", "Harmony 设置"},
       {"Settings saved.", "设置已保存。"},
       {"Update Interval", "更新间隔"},
       {"Working Directory", "工作目录"},
@@ -31,17 +31,17 @@ function getTranslations(langCode)
       {"Cannot get system time. Session cleanup skipped.", "无法获取系统时间，跳过会话清理。"},
       {"Removed sessions: ", "已移除会话: "},
       {"Removed orphan file groups: ", "已移除孤立文件组: "},
-      {"Configure the Hormony bridge runtime parameters.", "配置 Hormony 桥接运行参数。"},
-      {"These settings are saved to Hormony_Config.json and read by the bridge script.", "这些设置保存在 Hormony_Config.json 中，由桥接脚本读取。"},
+      {"Configure the Harmony bridge runtime parameters.", "配置 Harmony 桥接运行参数。"},
+      {"These settings are saved to Harmony_Config.json and read by the bridge script.", "这些设置保存在 Harmony_Config.json 中，由桥接脚本读取。"},
       {"Full mode uses read/write alternating: full cycle = 2 x interval. For large projects, use 3s or slower.", "全工模式使用读/写交替：完整周期 = 2 × 间隔。对于大型项目，建议使用 3 秒或更慢的间隔。"},
       {"Use Export Only / Import Only only if your external script requires it or you know exactly what you are doing. Default should be Full.", "仅在外部脚本需要时才使用「仅导出」/「仅导入」，\n    或者你清楚自己在做什么。默认应使用「全工」模式。"},
-      {"Cannot access hormony working directory:", "无法访问 Hormony 工作目录："},
+      {"Cannot access Harmony working directory:", "无法访问 Harmony 工作目录："},
       {"Please create this directory manually and try again.", "请手动创建该目录后重试。"},
       {"Failed to write config file:", "无法写入配置文件："},
       {"Error", "错误"},
       {"Config: ", "配置文件："},
       {"Sessions: ", "会话数："},
-      {" session(s) in Hormony_Session.json", " 个会话记录于 Hormony_Session.json"},
+      {" session(s) in Harmony_Session.json", " 个会话记录于 Harmony_Session.json"},
       {"End Detection Silence", "结尾检测静默"},
       {"End Detection Silence: if no notes exist for this duration after the last note, the export range stops there.", "结尾检测静默：若最后一个音符之后超过此时长没有音符，则导出范围到此为止。"},
     }
@@ -207,14 +207,14 @@ function json.decode(str)
 end
 
 -- ==========================================
--- Resolve hormony working directory
+-- Resolve Harmony working directory
 -- ==========================================
-local function resolveHormonyDir()
+local function resolveHarmonyDir()
   local home = os.getenv("USERPROFILE") or os.getenv("HOME")
   if home then
     home = home:gsub("\\", "/")
     if home:sub(-1) ~= "/" then home = home .. "/" end
-    return home .. "Documents/Dreamtonics/Synthesizer V Studio/hormony/"
+    return home .. "Documents/Dreamtonics/Synthesizer V Studio/Harmony/"
   end
   local ok, proj = pcall(function() return SV:getProject() end)
   if ok and proj then
@@ -222,19 +222,19 @@ local function resolveHormonyDir()
     if svpPath and svpPath ~= "" then
       svpPath = svpPath:gsub("\\", "/")
       local dir = svpPath:match("^(.+/)")
-      if dir then return dir .. "hormony/" end
+      if dir then return dir .. "Harmony/" end
     end
   end
-  return "D:/hormony/"
+  return "D:/Harmony/"
 end
 
-local HORMONY_DIR = resolveHormonyDir()
+local Harmony_DIR = resolveHarmonyDir()
 
 -- ==========================================
 -- Ensure directory exists
 -- ==========================================
-local function ensureHormonyDir()
-  local testPath = HORMONY_DIR .. ".hormony_test"
+local function ensureHarmonyDir()
+  local testPath = Harmony_DIR .. ".Harmony_test"
   local f = io.open(testPath, "w")
   if f then
     f:write("")
@@ -242,7 +242,7 @@ local function ensureHormonyDir()
     os.remove(testPath)
     return true
   end
-  local ok = os.execute('mkdir "' .. HORMONY_DIR:gsub("/", "\\") .. '" 2>nul')
+  local ok = os.execute('mkdir "' .. Harmony_DIR:gsub("/", "\\") .. '" 2>nul')
   if ok then
     f = io.open(testPath, "w")
     if f then
@@ -258,8 +258,8 @@ end
 -- ==========================================
 -- Config file read/write
 -- ==========================================
-local CONFIG_FILE_PATH = HORMONY_DIR .. "Hormony_Config.json"
-local SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
+local CONFIG_FILE_PATH = Harmony_DIR .. "Harmony_Config.json"
+local SESSION_FILE_PATH = Harmony_DIR .. "Harmony_Session.json"
 
 -- Interval options (must match the runtime script)
 local INTERVAL_OPTIONS = {
@@ -288,7 +288,7 @@ local END_DETECT_OPTIONS = {
 -- Default config values
 local DEFAULT_CONFIG = {
   interval = 3000,
-  hormonyDir = HORMONY_DIR,
+  HarmonyDir = Harmony_DIR,
   workMode = "full",
   scriptVersion = SCRIPT_VERSION,
   endDetectSec = 30,
@@ -306,7 +306,7 @@ local function readConfig()
 end
 
 local function writeConfig(cfg)
-  local dirOk = ensureHormonyDir()
+  local dirOk = ensureHarmonyDir()
   if not dirOk then return false end
   local f = io.open(CONFIG_FILE_PATH, "w")
   if not f then return false end
@@ -320,7 +320,7 @@ end
 -- Rules:
 --   1. state == "stopped" → remove session + delete bridge files
 --   2. state == "running" and no heartbeat for > 60s → remove (dead process) + delete bridge files
---   3. After removing sessions, scan hormony dir for *_out.json / *_in.json
+--   3. After removing sessions, scan Harmony dir for *_out.json / *_in.json
 --      not claimed by any surviving session → delete those orphan files
 -- ==========================================
 local function getTimestamp()
@@ -351,19 +351,19 @@ end
 -- Delete bridge files for a session
 local function deleteBridgeFiles(s)
   if s.sessionId then
-    local outPath = HORMONY_DIR .. s.sessionId .. "_out.json"
-    local inPath  = HORMONY_DIR .. s.sessionId .. "_in.json"
+    local outPath = Harmony_DIR .. s.sessionId .. "_out.json"
+    local inPath  = Harmony_DIR .. s.sessionId .. "_in.json"
     os.remove(outPath)
     os.remove(inPath)
   end
 end
 
--- List all *_out.json and *_in.json files in hormony dir
+-- List all *_out.json and *_in.json files in Harmony dir
 -- Returns a table of { uuid = true } for each uuid found
 local function listBridgeFileUUIDs()
   local uuids = {}
   -- Use dir command to list files (Windows)
-  local dirPath = HORMONY_DIR:gsub("/", "\\")
+  local dirPath = Harmony_DIR:gsub("/", "\\")
   local cmd = 'dir /b "' .. dirPath .. '" 2>nul'
   local pipe = io.popen(cmd)
   if not pipe then return uuids end
@@ -420,8 +420,8 @@ local function cleanSessions()
   local removedFiles = 0
   for uuid, _ in pairs(fileUUIDs) do
     if not knownUUIDs[uuid] then
-      local outPath = HORMONY_DIR .. uuid .. "_out.json"
-      local inPath  = HORMONY_DIR .. uuid .. "_in.json"
+      local outPath = Harmony_DIR .. uuid .. "_out.json"
+      local inPath  = Harmony_DIR .. uuid .. "_in.json"
       os.remove(outPath)
       os.remove(inPath)
       removedFiles = removedFiles + 1
@@ -435,10 +435,10 @@ end
 -- Main: Settings UI
 -- ==========================================
 function main()
-  local dirOk = ensureHormonyDir()
+  local dirOk = ensureHarmonyDir()
   if not dirOk then
     SV:showMessageBox(SV:T("Error"),
-      SV:T("Cannot access hormony working directory:") .. "\n" .. HORMONY_DIR
+      SV:T("Cannot access Harmony working directory:") .. "\n" .. Harmony_DIR
       .. "\n\n" .. SV:T("Please create this directory manually and try again."))
     SV:finish()
     return
@@ -447,7 +447,7 @@ function main()
   -- Load existing config or use defaults
   local cfg = readConfig() or {}
   local currentInterval = cfg.interval or DEFAULT_CONFIG.interval
-  local currentDir = cfg.hormonyDir or DEFAULT_CONFIG.hormonyDir
+  local currentDir = cfg.HarmonyDir or DEFAULT_CONFIG.HarmonyDir
   local currentWorkMode = cfg.workMode or DEFAULT_CONFIG.workMode
   local currentEndDetect = cfg.endDetectSec or DEFAULT_CONFIG.endDetectSec
 
@@ -495,13 +495,13 @@ function main()
 
   -- Count current sessions for display
   local sessions = readSessionFile()
-  local sessionInfo = #sessions .. SV:T(" session(s) in Hormony_Session.json")
+  local sessionInfo = #sessions .. SV:T(" session(s) in Harmony_Session.json")
 
   local form = {
-    title = SV:T("Hormony Settings"),
-    message = "Hormony API v" .. SCRIPT_VERSION
-      .. "\n\n" .. SV:T("Configure the Hormony bridge runtime parameters.")
-      .. "\n" .. SV:T("These settings are saved to Hormony_Config.json and read by the bridge script.")
+    title = SV:T("Harmony Settings"),
+    message = "Harmony API v" .. SCRIPT_VERSION
+      .. "\n\n" .. SV:T("Configure the Harmony bridge runtime parameters.")
+      .. "\n" .. SV:T("These settings are saved to Harmony_Config.json and read by the bridge script.")
       .. "\n\n" .. SV:T("Config: ") .. CONFIG_FILE_PATH
       .. "\n" .. SV:T("Sessions: ") .. sessionInfo
       .. "\n\n" .. SV:T("Full mode uses read/write alternating: full cycle = 2 x interval. For large projects, use 3s or slower.")
@@ -531,7 +531,7 @@ function main()
         default = endDetectDefault
       },
       {
-        name = "hormonyDir",
+        name = "HarmonyDir",
         type = "TextBox",
         label = SV:T("Working Directory"),
         default = currentDir
@@ -560,7 +560,7 @@ function main()
       newWorkMode = WORK_MODE_OPTIONS[workModeIdx].value
     end
 
-    local newDir = results.answers.hormonyDir or currentDir
+    local newDir = results.answers.HarmonyDir or currentDir
     newDir = newDir:gsub("\\", "/")
     if newDir:sub(-1) ~= "/" then newDir = newDir .. "/" end
 
@@ -572,7 +572,7 @@ function main()
 
     local newCfg = {
       interval = newInterval,
-      hormonyDir = newDir,
+      HarmonyDir = newDir,
       workMode = newWorkMode,
       scriptVersion = SCRIPT_VERSION,
       endDetectSec = newEndDetect,

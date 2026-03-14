@@ -1,12 +1,12 @@
--- HormonyBridge.lua
--- Hormony API — JSON Loop Bridge
+-- HarmonyBridge.lua
+-- Harmony API — JSON Loop Bridge
 -- Pure runtime script: starts the loop on click, runs until SV stops scripts.
--- No UI dialogs. Reads config from Hormony_Config.json (written by HormonySettings.lua).
+-- No UI dialogs. Reads config from Harmony_Config.json (written by HarmonySettings.lua).
 -- Supports work modes: full (export+import), export only, import only.
 
 function getClientInfo()
   return {
-    name = SV:T("Hormony Bridge"),
+    name = SV:T("Harmony Bridge"),
     author = "Wuyilingwei",
     versionNumber = 1,
     minEditorVersion = 65537
@@ -16,7 +16,7 @@ end
 function getTranslations(langCode)
   if langCode == "zh-cn" then
     return {
-      {"Hormony Bridge", "Hormony 桥接"},
+      {"Harmony Bridge", "Harmony 桥接"},
     }
   end
   return {}
@@ -293,22 +293,22 @@ end
 -- Global state & configuration
 -- ==========================================
 local isLoopModeActive = false
-local loopInterval  = 3000 -- default, overridden by Hormony_Config.json
+local loopInterval  = 3000 -- default, overridden by Harmony_Config.json
 local FRAME_INTERVAL = 50  -- ms between export phase steps during active export
 local lastImportedContents = ""
 local SCRIPT_VERSION = "0.3.0"
 
 -- 结尾检测：超过此秒数没有音符则认定文件已结束
--- 可通过 Hormony_Config.json 的 endDetectSec 字段覆盖
+-- 可通过 Harmony_Config.json 的 endDetectSec 字段覆盖
 local endDetectSec = 30
 
--- Dynamically resolve hormony working directory
-local function resolveHormonyDir()
+-- Dynamically resolve Harmony working directory
+local function resolveHarmonyDir()
   local home = os.getenv("USERPROFILE") or os.getenv("HOME")
   if home then
     home = home:gsub("\\", "/")
     if home:sub(-1) ~= "/" then home = home .. "/" end
-    return home .. "Documents/Dreamtonics/Synthesizer V Studio/hormony/"
+    return home .. "Documents/Dreamtonics/Synthesizer V Studio/Harmony/"
   end
   local ok, proj = pcall(function() return SV:getProject() end)
   if ok and proj then
@@ -316,16 +316,16 @@ local function resolveHormonyDir()
     if svpPath and svpPath ~= "" then
       svpPath = svpPath:gsub("\\", "/")
       local dir = svpPath:match("^(.+/)")
-      if dir then return dir .. "hormony/" end
+      if dir then return dir .. "Harmony/" end
     end
   end
-  return "D:/hormony/"
+  return "D:/Harmony/"
 end
 
-local HORMONY_DIR = resolveHormonyDir()
-local SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
-local CONFIG_FILE_PATH  = HORMONY_DIR .. "Hormony_Config.json"
-local LOCK_FILE_PATH    = HORMONY_DIR .. "Hormony_Lock.json"
+local Harmony_DIR = resolveHarmonyDir()
+local SESSION_FILE_PATH = Harmony_DIR .. "Harmony_Session.json"
+local CONFIG_FILE_PATH  = Harmony_DIR .. "Harmony_Config.json"
+local LOCK_FILE_PATH    = Harmony_DIR .. "Harmony_Lock.json"
 local currentSessionId = nil
 local workMode = "full" -- "full", "export", "import"
 local paramTypeNames = {
@@ -333,8 +333,8 @@ local paramTypeNames = {
   "breathiness", "voicing", "gender", "toneShift"
 }
 
--- Read config from Hormony_Config.json (written by HormonySettings.lua)
--- Returns a table with at least { interval, hormonyDir } or defaults
+-- Read config from Harmony_Config.json (written by HarmonySettings.lua)
+-- Returns a table with at least { interval, HarmonyDir } or defaults
 local function readConfig()
   local f = io.open(CONFIG_FILE_PATH, "r")
   if not f then return nil end
@@ -395,14 +395,14 @@ local function generateUUIDv4()
 end
 
 -- ==========================================
--- hormony 工作目录与 bridge 路径
+-- Harmony 工作目录与 bridge 路径
 -- ==========================================
 
--- 确保 hormony 工作目录存在（自动创建）
+-- 确保 Harmony 工作目录存在（自动创建）
 -- 返回 true 表示目录可用，false 表示无法创建/写入
-local function ensureHormonyDir()
+local function ensureHarmonyDir()
   -- 先测试目录是否已可用
-  local testPath = HORMONY_DIR .. ".hormony_test"
+  local testPath = Harmony_DIR .. ".Harmony_test"
   local f = io.open(testPath, "w")
   if f then
     f:write("")
@@ -411,7 +411,7 @@ local function ensureHormonyDir()
     return true
   end
   -- 目录不存在，尝试自动创建
-  local ok = os.execute('mkdir "' .. HORMONY_DIR:gsub("/", "\\") .. '" 2>nul')
+  local ok = os.execute('mkdir "' .. Harmony_DIR:gsub("/", "\\") .. '" 2>nul')
   if ok then
     -- 再次验证
     f = io.open(testPath, "w")
@@ -429,21 +429,21 @@ end
 -- uuid: 会话 UUID
 -- 返回两个路径: outPath (SV -> 外部), inPath (外部 -> SV)
 local function getBridgePaths(uuid)
-  local outPath = HORMONY_DIR .. uuid .. "_out.json"
-  local inPath  = HORMONY_DIR .. uuid .. "_in.json"
+  local outPath = Harmony_DIR .. uuid .. "_out.json"
+  local inPath  = Harmony_DIR .. uuid .. "_in.json"
   return outPath, inPath
 end
 
 -- ==========================================
--- Hormony_Session 管理
--- 文件位置: hormony/Hormony_Session.json
+-- Harmony_Session 管理
+-- 文件位置: Harmony/Harmony_Session.json
 -- 格式: JSON 数组，每个元素为一个 session 记录
 -- ==========================================
 
 -- session 记录的标准字段顺序
 local SESSION_KEY_ORDER = {
   "svVersion", "scriptVersion", "sessionId",
-  "svpFilePath", "hormonyDir", "bridgeOutPath", "bridgeInPath",
+  "svpFilePath", "HarmonyDir", "bridgeOutPath", "bridgeInPath",
   "timestamp", "state"
 }
 
@@ -483,7 +483,7 @@ local function writeSessionFile(sessions)
 end
 
 -- ==========================================
--- 锁文件：Hormony_Lock.json
+-- 锁文件：Harmony_Lock.json
 -- 格式: { "sessionId": "uuid", "timestamp": 123456 }
 -- 用于"同一编辑器只允许一个桥接实例"的开关检测
 -- ==========================================
@@ -575,7 +575,7 @@ local function registerSession()
     scriptVersion = SCRIPT_VERSION,
     sessionId     = uuid,
     svpFilePath   = projPath,
-    hormonyDir    = HORMONY_DIR,
+    HarmonyDir    = Harmony_DIR,
     bridgeOutPath = outPath,
     bridgeInPath  = inPath,
     timestamp     = getTimestamp(),
@@ -1831,7 +1831,7 @@ end
 -- Loop engine (dual-file + read/write alternating)
 -- {uuid}_out.json: SV continuously writes current project data
 -- {uuid}_in.json:  SV monitors for external changes, applies diffs
--- All files in hormony/ working directory
+-- All files in Harmony/ working directory
 --
 -- Work modes:
 --   "full"   -> alternating export/import (odd tick export, even tick import)
@@ -1887,27 +1887,27 @@ end
 -- Main: 开关切换（点击启动/停止桥接）
 -- ==========================================
 function main()
-  -- Ensure hormony working directory is accessible
-  local dirOk = ensureHormonyDir()
+  -- Ensure Harmony working directory is accessible
+  local dirOk = ensureHarmonyDir()
   if not dirOk then
     SV:showMessageBox("Error",
-      "Cannot access hormony working directory:\n" .. HORMONY_DIR
-      .. "\n\nPlease create this directory manually or run Hormony Settings first.")
+      "Cannot access Harmony working directory:\n" .. Harmony_DIR
+      .. "\n\nPlease create this directory manually or run Harmony Settings first.")
     SV:finish()
     return
   end
 
-  -- Load config from Hormony_Config.json (written by HormonySettings.lua)
+  -- Load config from Harmony_Config.json (written by HarmonySettings.lua)
   local cfg = readConfig()
   if cfg then
     if cfg.interval and type(cfg.interval) == "number" then
       loopInterval = cfg.interval
     end
-    if cfg.hormonyDir and type(cfg.hormonyDir) == "string" and cfg.hormonyDir ~= "" then
-      HORMONY_DIR    = cfg.hormonyDir
-      SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
-      CONFIG_FILE_PATH  = HORMONY_DIR .. "Hormony_Config.json"
-      LOCK_FILE_PATH    = HORMONY_DIR .. "Hormony_Lock.json"
+    if cfg.HarmonyDir and type(cfg.HarmonyDir) == "string" and cfg.HarmonyDir ~= "" then
+      Harmony_DIR    = cfg.HarmonyDir
+      SESSION_FILE_PATH = Harmony_DIR .. "Harmony_Session.json"
+      CONFIG_FILE_PATH  = Harmony_DIR .. "Harmony_Config.json"
+      LOCK_FILE_PATH    = Harmony_DIR .. "Harmony_Lock.json"
     end
     if cfg.workMode and (cfg.workMode == "full" or cfg.workMode == "export" or cfg.workMode == "import") then
       workMode = cfg.workMode

@@ -14,10 +14,10 @@ SV_Harmony_API provides a JSON Loop IO Bridge that runs inside Synthesizer V Stu
 
 The system is split into two scripts:
 
-| Script | Purpose |
-|--------|---------|
-| **Hormony Bridge** (`HormonyBridge.lua`) | Runtime: starts the bridge loop on click. No UI dialogs. |
-| **Hormony Settings** (`HormonySettings.lua`) | Configuration UI: update interval, work mode, end detection silence, working directory, session cleanup. Saves to `Hormony_Config.json`. |
+| Script                                       | Purpose                                                                                                                                  |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **Harmony Bridge** (`HarmonyBridge.lua`)     | Runtime: starts the bridge loop on click. No UI dialogs.                                                                                 |
+| **Harmony Settings** (`HarmonySettings.lua`) | Configuration UI: update interval, work mode, end detection silence, working directory, session cleanup. Saves to `Harmony_Config.json`. |
 
 ### Why a Pseudo-Bus?
 
@@ -30,8 +30,8 @@ Synthesizer V's Lua scripting sandbox does not expose sockets, named pipes, or a
 |   Synthesizer V Studio     |          |   External Program         |
 |                            |          |   (Python, C#, etc.)       |
 |  +----------------------+  |          |  +----------------------+  |
-|  | Hormony Bridge       |  |          |  | Reads/writes JSON    |  |
-|  | (HormonyBridge.lua)  |  |          |  |                      |  |
+|  | Harmony Bridge       |  |          |  | Reads/writes JSON    |  |
+|  | (HarmonyBridge.lua)  |  |          |  |                      |  |
 |  +------+----------+----+  |          |  +----+-----------+-----+  |
 |         |          ^        |          |       ^           |        |
 +---------+----------|-------+          +-------|-----------|-------+
@@ -41,23 +41,23 @@ Synthesizer V's Lua scripting sandbox does not expose sockets, named pipes, or a
    (SV --> External)  |                          |    (External --> SV)
                       +--------------------------+
 
-                    hormony/ working directory
-                    (default: ~/Documents/Dreamtonics/Synthesizer V Studio/hormony/)
+                    Harmony/ working directory
+                    (default: ~/Documents/Dreamtonics/Synthesizer V Studio/Harmony/)
 ```
 
-**Session-based file naming:** Each loop session generates a unique UUID. Bridge files are named `{uuid}_out.json` and `{uuid}_in.json` in the hormony working directory. Session metadata is tracked in `Hormony_Session.json`.
+**Session-based file naming:** Each loop session generates a unique UUID. Bridge files are named `{uuid}_out.json` and `{uuid}_in.json` in the Harmony working directory. Session metadata is tracked in `Harmony_Session.json`.
 
 **Two bridge files prevent read/write collisions:**
 
-| File | Direction | Writer | Reader |
-|------|-----------|--------|--------|
-| `{uuid}_out.json` | SV --> External | SV (every tick) | External program |
-| `{uuid}_in.json` | External --> SV | External program | SV (every tick) |
-| `Hormony_Lock.json` | Toggle signal | Bridge (on start) | Bridge (on click) |
+| File                | Direction       | Writer            | Reader            |
+| ------------------- | --------------- | ----------------- | ----------------- |
+| `{uuid}_out.json`   | SV --> External | SV (every tick)   | External program  |
+| `{uuid}_in.json`    | External --> SV | External program  | SV (every tick)   |
+| `Harmony_Lock.json` | Toggle signal   | Bridge (on start) | Bridge (on click) |
 
 The bridge uses **asynchronous phased export**: each export cycle is split into multiple phases (metadata → one track per tick → JSON encoding → file write), spreading work across several timer ticks to avoid blocking the SV main thread. In Full mode, an import is performed after each export cycle completes.
 
-**Toggle mechanism:** `Hormony_Lock.json` records the active session ID. Clicking Hormony Bridge a second time detects this file and deletes it, which the running loop interprets as a stop signal at the next tick.
+**Toggle mechanism:** `Harmony_Lock.json` records the active session ID. Clicking Harmony Bridge a second time detects this file and deletes it, which the running loop interprets as a stop signal at the next tick.
 
 ## Features
 
@@ -72,7 +72,7 @@ The bridge uses **asynchronous phased export**: each export cycle is split into 
 - **SVP-compatible JSON format** -- output matches the official `.svp` file structure
 - **Full project coverage** -- notes, 8 parameter curves (pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, gender, toneShift), tempo, time signatures, mixer settings, render config
 - **Zero dependencies** -- includes a built-in pure-Lua JSON encoder/decoder
-- **Session management** -- UUID-based sessions with auto-expiry, tracked in `Hormony_Session.json`
+- **Session management** -- UUID-based sessions with auto-expiry, tracked in `Harmony_Session.json`
 - **Field-level diff import** -- only modifies notes/parameters that actually changed
 - **Change detection** -- only applies imports when file content actually changes
 - **Configurable** -- update interval, work mode, end detection silence, and working directory via the Settings script
@@ -89,8 +89,8 @@ The bridge uses **asynchronous phased export**: each export cycle is split into 
 1. Copy both scripts into your Synthesizer V Studio scripts directory:
 2. go to **Scripts > Open Scripts Folder**
    ```
-   HormonyBridge.lua          (Hormony Bridge - runtime)
-   HormonySettings.lua       (Hormony Settings - configuration)
+   HarmonyBridge.lua          (Harmony Bridge - runtime)
+   HarmonySettings.lua       (Harmony Settings - configuration)
    ```
    Place them in:
    ```
@@ -104,31 +104,31 @@ The bridge uses **asynchronous phased export**: each export cycle is split into 
 
 1. **Save your project** (`Ctrl+S`) before running the bridge. The script reads the `.svp` file on disk to extract voice library (database) and `systemPitchDelta` data that are not accessible through the scripting API.
 
-2. **(Optional) Configure settings**: From the **Scripts** menu, select **Hormony Settings** to set the update interval, work mode, end detection silence, and working directory. Settings are saved to `Hormony_Config.json`.
+2. **(Optional) Configure settings**: From the **Scripts** menu, select **Harmony Settings** to set the update interval, work mode, end detection silence, and working directory. Settings are saved to `Harmony_Config.json`.
 
    **Work modes:**
-   | Mode | Behavior | Use case |
-   |------|----------|----------|
-   | **Full** (default) | Async phased export, then import after each export cycle completes | Normal bidirectional workflow |
-   | **Export Only** | Async phased export every cycle, no import | Read-only external tools (monitoring, analysis) |
-   | **Import Only** | Import every tick, no export | One-way external control |
+   | Mode               | Behavior                                                           | Use case                                        |
+   | ------------------ | ------------------------------------------------------------------ | ----------------------------------------------- |
+   | **Full** (default) | Async phased export, then import after each export cycle completes | Normal bidirectional workflow                   |
+   | **Export Only**    | Async phased export every cycle, no import                         | Read-only external tools (monitoring, analysis) |
+   | **Import Only**    | Import every tick, no export                                       | One-way external control                        |
 
    **End Detection Silence:**
-   | Setting | Behavior |
-   |---------|----------|
-   | **15s** | Export range stops 15 seconds after last note |
-   | **30s** (default) | Export range stops 30 seconds after last note |
-   | **60s** | Export range stops 60 seconds after last note |
-   | **120s** | Export range stops 120 seconds after last note |
+   | Setting           | Behavior                                       |
+   | ----------------- | ---------------------------------------------- |
+   | **15s**           | Export range stops 15 seconds after last note  |
+   | **30s** (default) | Export range stops 30 seconds after last note  |
+   | **60s**           | Export range stops 60 seconds after last note  |
+   | **120s**          | Export range stops 120 seconds after last note |
 
    > **Note:** Export Only / Import Only should only be used if the external script requires it or you know what you are doing. The default Full mode is recommended for most use cases.
 
-3. **Start the bridge**: From the **Scripts** menu, select **Hormony Bridge**. The loop starts immediately (no dialog). The hormony working directory will be created automatically if needed.
+3. **Start the bridge**: From the **Scripts** menu, select **Harmony Bridge**. The loop starts immediately (no dialog). The Harmony working directory will be created automatically if needed.
 
-4. **Stop the bridge**: Click **Hormony Bridge** again. The script detects the running instance via a lock file (`Hormony_Lock.json`) and sends a stop signal. The running loop stops at the next tick and cleans up automatically. Only one bridge instance can run per SV editor at a time.
+4. **Stop the bridge**: Click **Harmony Bridge** again. The script detects the running instance via a lock file (`Harmony_Lock.json`) and sends a stop signal. The running loop stops at the next tick and cleans up automatically. Only one bridge instance can run per SV editor at a time.
 
 5. **For external program integration**, write your tool to:
-   - Read `Hormony_Session.json` to discover the active session UUID and file paths
+   - Read `Harmony_Session.json` to discover the active session UUID and file paths
    - **Read** `{uuid}_out.json` to get the current SV project state
    - **Write** `{uuid}_in.json` to push changes back into SV
 
@@ -138,7 +138,7 @@ The bridge uses **asynchronous phased export**: each export cycle is split into 
 
 ### Session Cleanup
 
-Over time, stale sessions and orphan bridge files can accumulate in the hormony working directory. To clean them up, open **Hormony Settings** and check the **Clean Sessions** checkbox before clicking OK.
+Over time, stale sessions and orphan bridge files can accumulate in the Harmony working directory. To clean them up, open **Harmony Settings** and check the **Clean Sessions** checkbox before clicking OK.
 
 Cleanup rules:
 - Sessions with `state == "stopped"` are removed immediately, along with their bridge files.
@@ -147,11 +147,11 @@ Cleanup rules:
 
 ### Bridge File Location
 
-Bridge files are created in the **hormony working directory**:
+Bridge files are created in the **Harmony working directory**:
 ```
-~/Documents/Dreamtonics/Synthesizer V Studio/hormony/
+~/Documents/Dreamtonics/Synthesizer V Studio/Harmony/
 ```
-This can be overridden in Hormony Settings. The directory is created automatically on first run.
+This can be overridden in Harmony Settings. The directory is created automatically on first run.
 
 ## JSON Data Format
 
@@ -201,8 +201,8 @@ The bridge produces JSON structurally identical to the official `.svp` format. T
 ## Project Structure
 
 ```
-HormonyBridge.lua          # Runtime bridge (starts loop on click, no UI)
-HormonySettings.lua        # Settings UI (interval, work mode, working dir, session cleanup)
+HarmonyBridge.lua          # Runtime bridge (starts loop on click, no UI)
+HarmonySettings.lua        # Settings UI (interval, work mode, working dir, session cleanup)
 Test_Loop.lua              # Proof-of-concept file-polling loop
 test_io.lua                # Basic file I/O validation test
 LICENSE.txt                # ALE 1.1 + GPL v3.0 dual license
