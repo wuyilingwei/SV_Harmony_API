@@ -702,7 +702,11 @@ local function buildParametersData(group)
     local pAM = group:getParameter(paramType)
     local flattenedPoints = {}
     if pAM then
-      local points = pAM:getPoints(-10000000, 100000000)
+      -- blick 范围：覆盖约 10 分钟 @ 60 BPM（2400 拍 + 余量）
+      -- 1 拍 = 705600000 blick
+      local RANGE_MIN = -705600000          -- ~ -1 拍（允许前置数据）
+      local RANGE_MAX = 2117000000000       -- ~ 3000 拍 ≈ 10 分钟 @ 最慢 ~50 BPM
+      local points = pAM:getPoints(RANGE_MIN, RANGE_MAX)
       for _, pt in ipairs(points) do
         -- 位置为整数，值为浮点数
         table.insert(flattenedPoints, pt[1])
