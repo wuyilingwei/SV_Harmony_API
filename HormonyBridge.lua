@@ -322,7 +322,8 @@ end
 
 local HORMONY_DIR = resolveHormonyDir()
 local SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
-local CONFIG_FILE_PATH = HORMONY_DIR .. "Hormony_Config.json"
+local CONFIG_FILE_PATH  = HORMONY_DIR .. "Hormony_Config.json"
+local LOCK_FILE_PATH    = HORMONY_DIR .. "Hormony_Lock.json"
 local currentSessionId = nil
 local workMode = "full" -- "full", "export", "import"
 local paramTypeNames = {
@@ -477,6 +478,42 @@ local function writeSessionFile(sessions)
   f:write(json.encode(sessions))
   f:close()
   return true
+end
+
+-- ==========================================
+-- 锁文件：Hormony_Lock.json
+-- 格式: { "sessionId": "uuid", "timestamp": 123456 }
+-- 用于"同一编辑器只允许一个桥接实例"的开关检测
+-- ==========================================
+
+local function readLockFile()
+  local f = io.open(LOCK_FILE_PATH, "r")
+  if not f then return nil end
+  local content = f:read("*a")
+  f:close()
+  if not content or content == "" then return nil end
+  local ok, data = pcall(function() return json.decode(content) end)
+  if ok and type(data) == "table" then return data end
+  return nil
+end
+
+local function writeLockFile(sessionId)
+  local f = io.open(LOCK_FILE_PATH, "w")
+  if not f then return false end
+  f:write('{"sessionId":"' .. sessionId .. '","timestamp":' .. getTimestamp() .. '}')
+  f:close()
+  return true
+end
+
+local function deleteLockFile()
+  os.remove(LOCK_FILE_PATH)
+end
+
+-- 检查锁文件是否属于自己的 session（用于 loopTick 判断是否继续）
+local function lockBelongsToMe(sessionId)
+  local lock = readLockFile()
+  if not lock then return false end
+  return lock.sessionId == sessionId
 end
 
 -- 清理过期 session
@@ -1385,9 +1422,18 @@ local loopTickCount = 0
 
 local function loopTick()
   if not isLoopModeActive then return end
-  
+
+  -- 检查锁文件是否仍属于本实例；若不是则说明收到停止信号
+  if not lockBelongsToMe(currentSessionId) then
+    isLoopModeActive = false
+    updateSessionState(currentSessionId, "stopped")
+    -- 锁文件已被第二次点击删除，无需再删
+    SV:finish()
+    return
+  end
+
   loopTickCount = loopTickCount + 1
-  
+
   if workMode == "export" then
     exportProjectModel(loopOutPath, true)
   elseif workMode == "import" then
@@ -1400,17 +1446,17 @@ local function loopTick()
       importFromFile(loopInPath)
     end
   end
-  
+
   -- Update session timestamp every 20 ticks (reduce disk IO)
   if loopTickCount % 20 == 0 then
     updateSessionTimestamp(currentSessionId)
   end
-  
+
   SV:setTimeout(loopInterval, loopTick)
 end
 
 -- ==========================================
--- Main: Start loop (no UI dialogs)
+-- Main: 开关切换（点击启动/停止桥接）
 -- ==========================================
 function main()
   -- Ensure hormony working directory is accessible
@@ -1430,13 +1476,27 @@ function main()
       loopInterval = cfg.interval
     end
     if cfg.hormonyDir and type(cfg.hormonyDir) == "string" and cfg.hormonyDir ~= "" then
-      HORMONY_DIR = cfg.hormonyDir
+      HORMONY_DIR    = cfg.hormonyDir
       SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
-      CONFIG_FILE_PATH = HORMONY_DIR .. "Hormony_Config.json"
+      CONFIG_FILE_PATH  = HORMONY_DIR .. "Hormony_Config.json"
+      LOCK_FILE_PATH    = HORMONY_DIR .. "Hormony_Lock.json"
     end
     if cfg.workMode and (cfg.workMode == "full" or cfg.workMode == "export" or cfg.workMode == "import") then
       workMode = cfg.workMode
     end
+  end
+
+  -- 检查锁文件：若存在且 timestamp 距今 < 120s，说明有实例正在运行 → 发送停止信号
+  local lock = readLockFile()
+  if lock and lock.sessionId and lock.timestamp then
+    local age = getTimestamp() - (lock.timestamp or 0)
+    if age < 120 then
+      -- 删除锁文件 = 停止信号，运行中的 loopTick 检测到后会自行退出
+      deleteLockFile()
+      SV:finish()
+      return
+    end
+    -- 锁文件过期（可能是崩溃遗留），继续启动
   end
 
   -- Pre-load .svp file for database/systemPitchDelta
@@ -1447,6 +1507,9 @@ function main()
   -- Register session (generates UUID and bridge file paths)
   local uuid, outPath, inPath = registerSession()
   currentSessionId = uuid
+
+  -- 写入锁文件，标记本实例为当前运行的桥接
+  writeLockFile(uuid)
 
   -- Initial export to {uuid}_out.json
   if workMode ~= "import" then

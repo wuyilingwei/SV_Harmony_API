@@ -53,8 +53,11 @@ Synthesizer V's Lua scripting sandbox does not expose sockets, named pipes, or a
 |------|-----------|--------|--------|
 | `{uuid}_out.json` | SV --> External | SV (every tick) | External program |
 | `{uuid}_in.json` | External --> SV | External program | SV (every tick) |
+| `Hormony_Lock.json` | Toggle signal | Bridge (on start) | Bridge (on click) |
 
 The bridge uses **read/write alternating**: odd ticks export, even ticks import. The full read/write cycle is 2x the configured interval. This halves per-tick blocking time.
+
+**Toggle mechanism:** `Hormony_Lock.json` records the active session ID. Clicking Hormony Bridge a second time detects this file and deletes it, which the running loop interprets as a stop signal at the next tick.
 
 ## Features
 
@@ -108,7 +111,7 @@ The bridge uses **read/write alternating**: odd ticks export, even ticks import.
 
 3. **Start the bridge**: From the **Scripts** menu, select **Hormony Bridge**. The loop starts immediately (no dialog). The hormony working directory will be created automatically if needed.
 
-4. **Stop the bridge**: The bridge runs until SV stops the script (e.g., closing SV, rescanning scripts, or running another script). There is no toggle mechanism -- the loop simply runs until interrupted.
+4. **Stop the bridge**: Click **Hormony Bridge** again. The script detects the running instance via a lock file (`Hormony_Lock.json`) and sends a stop signal. The running loop stops at the next tick and cleans up automatically. Only one bridge instance can run per SV editor at a time.
 
 5. **For external program integration**, write your tool to:
    - Read `Hormony_Session.json` to discover the active session UUID and file paths

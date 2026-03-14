@@ -34,10 +34,14 @@ function getTranslations(langCode)
       {"Configure the Hormony bridge runtime parameters.", "配置 Hormony 桥接运行参数。"},
       {"These settings are saved to Hormony_Config.json and read by the bridge script.", "这些设置保存在 Hormony_Config.json 中，由桥接脚本读取。"},
       {"[i] Full mode uses read/write alternating: full cycle = 2 x interval.\n    For large projects, use 3s or slower.", "[i] 全工模式使用读/写交替：完整周期 = 2 × 间隔。\n    对于大型项目，建议使用 3 秒或更慢的间隔。"},
-      {"[!] Use Export Only / Import Only only if your external script requires it\n    or you know exactly what you are doing. Default should be Full.", "[!] 仅在外部脚本需要时才使用"仅导出"/"仅导入"，\n    或者你清楚自己在做什么。默认应使用"全工"模式。"},
+      {"[!] Use Export Only / Import Only only if your external script requires it\n    or you know exactly what you are doing. Default should be Full.", "[!] 仅在外部脚本需要时才使用「仅导出」/「仅导入」，\n    或者你清楚自己在做什么。默认应使用「全工」模式。"},
       {"Cannot access hormony working directory:", "无法访问 Hormony 工作目录："},
       {"Please create this directory manually and try again.", "请手动创建该目录后重试。"},
       {"Failed to write config file:", "无法写入配置文件："},
+      {"Error", "错误"},
+      {"Config: ", "配置文件："},
+      {"Sessions: ", "会话数："},
+      {" session(s) in Hormony_Session.json", " 个会话记录于 Hormony_Session.json"},
     }
   end
   return {}
@@ -410,7 +414,7 @@ end
 function main()
   local dirOk = ensureHormonyDir()
   if not dirOk then
-    SV:showMessageBox("Error",
+    SV:showMessageBox(SV:T("Error"),
       SV:T("Cannot access hormony working directory:") .. "\n" .. HORMONY_DIR
       .. "\n\n" .. SV:T("Please create this directory manually and try again."))
     SV:finish()
@@ -454,15 +458,15 @@ function main()
 
   -- Count current sessions for display
   local sessions = readSessionFile()
-  local sessionInfo = #sessions .. " session(s) in Hormony_Session.json"
+  local sessionInfo = #sessions .. SV:T(" session(s) in Hormony_Session.json")
 
   local form = {
     title = SV:T("Hormony Settings"),
     message = "Hormony v" .. SCRIPT_VERSION
       .. "\n\n" .. SV:T("Configure the Hormony bridge runtime parameters.")
       .. "\n" .. SV:T("These settings are saved to Hormony_Config.json and read by the bridge script.")
-      .. "\n\nConfig: " .. CONFIG_FILE_PATH
-      .. "\nSessions: " .. sessionInfo
+      .. "\n\n" .. SV:T("Config: ") .. CONFIG_FILE_PATH
+      .. "\n" .. SV:T("Sessions: ") .. sessionInfo
       .. "\n\n" .. SV:T("[i] Full mode uses read/write alternating: full cycle = 2 x interval.\n    For large projects, use 3s or slower.")
       .. "\n\n" .. SV:T("[!] Use Export Only / Import Only only if your external script requires it\n    or you know exactly what you are doing. Default should be Full."),
     buttons = "OkCancel",
@@ -527,7 +531,7 @@ function main()
     if ok then
       SV:showMessageBox(SV:T("Hormony Settings"), SV:T("Settings saved."))
     else
-      SV:showMessageBox("Error", SV:T("Failed to write config file:") .. "\n" .. CONFIG_FILE_PATH)
+      SV:showMessageBox(SV:T("Error"), SV:T("Failed to write config file:") .. "\n" .. CONFIG_FILE_PATH)
     end
 
     -- Clean sessions if requested
