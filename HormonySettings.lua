@@ -3,7 +3,7 @@
 -- Persists configuration to Hormony_Config.json in the hormony working directory.
 -- The runtime bridge script (HormonyBridge.lua) reads this config on start.
 
-local SCRIPT_VERSION = "0.2.0"
+local SCRIPT_VERSION = "0.3.0"
 
 function getClientInfo()
   return {
@@ -42,6 +42,8 @@ function getTranslations(langCode)
       {"Config: ", "配置文件："},
       {"Sessions: ", "会话数："},
       {" session(s) in Hormony_Session.json", " 个会话记录于 Hormony_Session.json"},
+      {"End Detection Silence", "结尾检测静默"},
+      {"[i] End Detection Silence: if no notes exist for this duration\n    after the last note, the export range stops there.", "[i] 结尾检测静默：若最后一个音符之后超过此时长没有音符，\n    则导出范围到此为止。"},
     }
   end
   return {}
@@ -61,7 +63,11 @@ local function escape_str(s)
   return s
 end
 
-function json.encode(val)
+-- json.encode(val [, indent [, _depth]])
+function json.encode(val, indent, _depth)
+  indent = indent or 0
+  _depth = _depth or 0
+  local pretty = indent > 0
   local t = type(val)
   if t == "number" then
     if val == math.floor(val) and val < 2147483647 and val > -2147483647 then
@@ -74,6 +80,13 @@ function json.encode(val)
   elseif t == "string" then
     return '"' .. escape_str(val) .. '"'
   elseif t == "table" then
+    local child_depth = _depth + 1
+    local cur_indent = pretty and string.rep(" ", indent * _depth) or ""
+    local child_indent = pretty and string.rep(" ", indent * child_depth) or ""
+    local nl = pretty and "\n" or ""
+    local sep = pretty and ",\n" or ","
+    local kv_sep = pretty and ": " or ":"
+
     -- Check if array
     local is_array = true
     local max_k = 0
@@ -88,22 +101,23 @@ function json.encode(val)
       local parts = {}
       for i = 1, max_k do
         if val[i] == nil then
-          table.insert(parts, "null")
+          table.insert(parts, child_indent .. "null")
         else
-          table.insert(parts, json.encode(val[i]))
+          table.insert(parts, child_indent .. json.encode(val[i], indent, child_depth))
         end
       end
-      return "[" .. table.concat(parts, ",") .. "]"
+      return "[" .. nl .. table.concat(parts, sep) .. nl .. cur_indent .. "]"
     elseif next(val) == nil then
       return "[]"
     else
       local parts = {}
       for k, v in pairs(val) do
         if type(k) == "string" then
-          table.insert(parts, '"' .. escape_str(k) .. '":' .. json.encode(v))
+          table.insert(parts, child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(v, indent, child_depth))
         end
       end
-      return "{" .. table.concat(parts, ",") .. "}"
+      if #parts == 0 then return "{}" end
+      return "{" .. nl .. table.concat(parts, sep) .. nl .. cur_indent .. "}"
     end
   elseif val == nil then
     return "null"
@@ -263,12 +277,21 @@ local WORK_MODE_OPTIONS = {
   { label = "Import Only",          value = "import" },
 }
 
+-- End detection silence options (seconds)
+local END_DETECT_OPTIONS = {
+  { label = "15s",  sec = 15 },
+  { label = "30s",  sec = 30 },
+  { label = "60s",  sec = 60 },
+  { label = "120s", sec = 120 },
+}
+
 -- Default config values
 local DEFAULT_CONFIG = {
   interval = 1000,
   hormonyDir = HORMONY_DIR,
   workMode = "full",
   scriptVersion = SCRIPT_VERSION,
+  endDetectSec = 30,
 }
 
 local function readConfig()
@@ -287,7 +310,7 @@ local function writeConfig(cfg)
   if not dirOk then return false end
   local f = io.open(CONFIG_FILE_PATH, "w")
   if not f then return false end
-  f:write(json.encode(cfg))
+  f:write(json.encode(cfg, 2))
   f:close()
   return true
 end
@@ -320,7 +343,7 @@ end
 local function writeSessionFile(sessions)
   local f = io.open(SESSION_FILE_PATH, "w")
   if not f then return false end
-  f:write(json.encode(sessions))
+  f:write(json.encode(sessions, 2))
   f:close()
   return true
 end
@@ -426,6 +449,7 @@ function main()
   local currentInterval = cfg.interval or DEFAULT_CONFIG.interval
   local currentDir = cfg.hormonyDir or DEFAULT_CONFIG.hormonyDir
   local currentWorkMode = cfg.workMode or DEFAULT_CONFIG.workMode
+  local currentEndDetect = cfg.endDetectSec or DEFAULT_CONFIG.endDetectSec
 
   -- Find the matching interval index for the ComboBox default
   local intervalDefault = 3  -- fallback to "1s" (index 3, 0-based)
@@ -456,6 +480,19 @@ function main()
     table.insert(workModeChoices, SV:T(opt.label))
   end
 
+  local endDetectDefault = 1
+  for idx, opt in ipairs(END_DETECT_OPTIONS) do
+    if opt.sec == currentEndDetect then
+      endDetectDefault = idx - 1
+      break
+    end
+  end
+
+  local endDetectChoices = {}
+  for _, opt in ipairs(END_DETECT_OPTIONS) do
+    table.insert(endDetectChoices, opt.label)
+  end
+
   -- Count current sessions for display
   local sessions = readSessionFile()
   local sessionInfo = #sessions .. SV:T(" session(s) in Hormony_Session.json")
@@ -468,7 +505,8 @@ function main()
       .. "\n\n" .. SV:T("Config: ") .. CONFIG_FILE_PATH
       .. "\n" .. SV:T("Sessions: ") .. sessionInfo
       .. "\n\n" .. SV:T("[i] Full mode uses read/write alternating: full cycle = 2 x interval.\n    For large projects, use 3s or slower.")
-      .. "\n\n" .. SV:T("[!] Use Export Only / Import Only only if your external script requires it\n    or you know exactly what you are doing. Default should be Full."),
+      .. "\n\n" .. SV:T("[!] Use Export Only / Import Only only if your external script requires it\n    or you know exactly what you are doing. Default should be Full.")
+      .. "\n\n" .. SV:T("[i] End Detection Silence: if no notes exist for this duration\n    after the last note, the export range stops there."),
     buttons = "OkCancel",
     widgets = {
       {
@@ -484,6 +522,13 @@ function main()
         label = SV:T("Work Mode"),
         choices = workModeChoices,
         default = workModeDefault
+      },
+      {
+        name = "endDetectSec",
+        type = "ComboBox",
+        label = SV:T("End Detection Silence"),
+        choices = endDetectChoices,
+        default = endDetectDefault
       },
       {
         name = "hormonyDir",
@@ -519,12 +564,18 @@ function main()
     newDir = newDir:gsub("\\", "/")
     if newDir:sub(-1) ~= "/" then newDir = newDir .. "/" end
 
-    -- Build and save config
+    local endDetectIdx = results.answers.endDetectSec + 1
+    local newEndDetect = DEFAULT_CONFIG.endDetectSec
+    if END_DETECT_OPTIONS[endDetectIdx] then
+      newEndDetect = END_DETECT_OPTIONS[endDetectIdx].sec
+    end
+
     local newCfg = {
       interval = newInterval,
       hormonyDir = newDir,
       workMode = newWorkMode,
       scriptVersion = SCRIPT_VERSION,
+      endDetectSec = newEndDetect,
     }
 
     local ok = writeConfig(newCfg)

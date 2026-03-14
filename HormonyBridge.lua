@@ -82,7 +82,13 @@ local function float(v)
   return { [FLOAT_MARKER] = v }
 end
 
-function json.encode(val)
+-- json.encode(val [, indent [, _depth]])
+-- indent: 缩进空格数（nil 或 0 表示紧凑模式，>0 表示松散/pretty 模式）
+-- _depth: 内部递归深度，外部调用时不要传
+function json.encode(val, indent, _depth)
+  indent = indent or 0
+  _depth = _depth or 0
+  local pretty = indent > 0
   local t = type(val)
   if t == "number" then
     -- 使用高精度格式化，%.16g 提供 16 位有效数字
@@ -112,6 +118,13 @@ function json.encode(val)
       return "{}"
     end
     
+    local child_depth = _depth + 1
+    local cur_indent = pretty and string.rep(" ", indent * _depth) or ""
+    local child_indent = pretty and string.rep(" ", indent * child_depth) or ""
+    local nl = pretty and "\n" or ""
+    local sep = pretty and ",\n" or ","
+    local kv_sep = pretty and ": " or ":"
+    
     -- 检查是否为有序键表（通过 __key_order 元数据）
     local key_order = val["__key_order__"]
     if key_order then
@@ -119,16 +132,17 @@ function json.encode(val)
       local used = { __key_order__ = true }
       for _, k in ipairs(key_order) do
         if val[k] ~= nil then
-          table.insert(parts, '"' .. escape_str(k) .. '":' .. json.encode(val[k]))
+          table.insert(parts, child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(val[k], indent, child_depth))
           used[k] = true
         end
       end
       for k, v in pairs(val) do
         if type(k) == "string" and not used[k] then
-          table.insert(parts, '"' .. escape_str(k) .. '":' .. json.encode(v))
+          table.insert(parts, child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(v, indent, child_depth))
         end
       end
-      return "{" .. table.concat(parts, ",") .. "}"
+      if #parts == 0 then return "{}" end
+      return "{" .. nl .. table.concat(parts, sep) .. nl .. cur_indent .. "}"
     end
     
     local is_array = true
@@ -145,22 +159,23 @@ function json.encode(val)
       local parts = {}
       for i = 1, max_k do
         if val[i] == nil then
-          table.insert(parts, "null")
+          table.insert(parts, child_indent .. "null")
         else
-          table.insert(parts, json.encode(val[i]))
+          table.insert(parts, child_indent .. json.encode(val[i], indent, child_depth))
         end
       end
-      return "[" .. table.concat(parts, ",") .. "]"
+      return "[" .. nl .. table.concat(parts, sep) .. nl .. cur_indent .. "]"
     elseif next(val) == nil then
       return "[]"  -- 默认空表为空数组
     else
       local parts = {}
       for k, v in pairs(val) do
         if type(k) == "string" then
-          table.insert(parts, '"' .. escape_str(k) .. '":' .. json.encode(v))
+          table.insert(parts, child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(v, indent, child_depth))
         end
       end
-      return "{" .. table.concat(parts, ",") .. "}"
+      if #parts == 0 then return "{}" end
+      return "{" .. nl .. table.concat(parts, sep) .. nl .. cur_indent .. "}"
     end
   elseif val == nil then
     return "null"
@@ -298,7 +313,11 @@ end
 local isLoopModeActive = false
 local loopInterval = 1000 -- default, overridden by Hormony_Config.json
 local lastImportedContents = ""
-local SCRIPT_VERSION = "0.2.0"
+local SCRIPT_VERSION = "0.3.0"
+
+-- 结尾检测：超过此秒数没有音符则认定文件已结束
+-- 可通过 Hormony_Config.json 的 endDetectSec 字段覆盖
+local endDetectSec = 30
 
 -- Dynamically resolve hormony working directory
 local function resolveHormonyDir()
@@ -475,7 +494,7 @@ end
 local function writeSessionFile(sessions)
   local f = io.open(SESSION_FILE_PATH, "w")
   if not f then return false end
-  f:write(json.encode(sessions))
+  f:write(json.encode(sessions, 2))
   f:close()
   return true
 end
@@ -500,7 +519,7 @@ end
 local function writeLockFile(sessionId)
   local f = io.open(LOCK_FILE_PATH, "w")
   if not f then return false end
-  f:write('{"sessionId":"' .. sessionId .. '","timestamp":' .. getTimestamp() .. '}')
+  f:write('{\n  "sessionId": "' .. sessionId .. '",\n  "timestamp": ' .. getTimestamp() .. '\n}')
   f:close()
   return true
 end
@@ -726,7 +745,52 @@ local function buildNoteData(note)
   )
 end
 
--- 构建参数数据
+-- 计算组内音符覆盖的 blick 范围，用于参数段获取
+-- 返回 rangeMin, rangeMax（blick 单位）
+-- rangeMin: 第一个音符 onset 前 1 拍（允许前置参数数据）
+-- rangeMax: 最后一个音符 end + endDetectSec 对应的 blick 余量
+local BLICK_PER_BEAT = 705600000
+
+local function computeNoteRange(group)
+  local numNotes = group:getNumNotes()
+  if numNotes == 0 then
+    return -BLICK_PER_BEAT, BLICK_PER_BEAT
+  end
+
+  local firstNote = group:getNote(1)
+  local lastNote = group:getNote(numNotes)
+  local rangeMin = firstNote:getOnset() - BLICK_PER_BEAT
+
+  local lastEnd = lastNote:getOnset() + lastNote:getDuration()
+
+  -- endDetectSec → blick: 保守估计使用 50 BPM（最慢常见曲速）
+  -- 1 秒 @ 50 BPM = 50/60 拍 = 0.833.. 拍
+  local gapBlicks = math.floor(endDetectSec * (50 / 60) * BLICK_PER_BEAT)
+  local rangeMax = lastEnd + gapBlicks
+
+  return rangeMin, rangeMax
+end
+
+-- 分段获取参数点：将大范围拆成多个段，逐段 getPoints 后拼接
+-- 每段覆盖 SEGMENT_BEATS 拍，避免单次 API 调用处理过大范围
+local SEGMENT_BEATS = 200
+local SEGMENT_BLICKS = SEGMENT_BEATS * BLICK_PER_BEAT
+
+local function getPointsSegmented(pAM, rangeMin, rangeMax)
+  local allPoints = {}
+  local segStart = rangeMin
+  while segStart < rangeMax do
+    local segEnd = segStart + SEGMENT_BLICKS
+    if segEnd > rangeMax then segEnd = rangeMax end
+    local points = pAM:getPoints(segStart, segEnd)
+    for _, pt in ipairs(points) do
+      table.insert(allPoints, pt)
+    end
+    segStart = segEnd
+  end
+  return allPoints
+end
+
 local function buildParametersData(group)
   local paramsData = ordered(
     {"pitchDelta", "vibratoEnv", "loudness", "tension",
@@ -734,17 +798,14 @@ local function buildParametersData(group)
     {}
   )
 
+  local rangeMin, rangeMax = computeNoteRange(group)
+
   for _, paramType in ipairs(paramTypeNames) do
     local pAM = group:getParameter(paramType)
     local flattenedPoints = {}
     if pAM then
-      -- blick 范围：覆盖约 10 分钟 @ 60 BPM（2400 拍 + 余量）
-      -- 1 拍 = 705600000 blick
-      local RANGE_MIN = -705600000          -- ~ -1 拍（允许前置数据）
-      local RANGE_MAX = 2117000000000       -- ~ 3000 拍 ≈ 10 分钟 @ 最慢 ~50 BPM
-      local points = pAM:getPoints(RANGE_MIN, RANGE_MAX)
+      local points = getPointsSegmented(pAM, rangeMin, rangeMax)
       for _, pt in ipairs(points) do
-        -- 位置为整数，值为浮点数
         table.insert(flattenedPoints, pt[1])
         table.insert(flattenedPoints, float(pt[2]))
       end
@@ -1158,15 +1219,295 @@ local function buildOfficialLikeFromModel()
   return snap
 end
 
+-- ==========================================
+-- 异步分阶段导出管线（Phased Export Pipeline）
+-- 将 buildOfficialLikeFromModel + json.encode + file write 分散到多个 timer tick
+-- 每个 tick 只处理一个阶段，避免长时间阻塞 SV 主线程
+--
+-- 阶段:
+--   "idle"    → 无待处理任务
+--   "meta"    → 构建 time/tempo/renderConfig（轻量）
+--   "track"   → 每 tick 构建一个轨道（音符 + 参数）
+--   "encode"  → json.encode（可能较重）
+--   "write"   → 写入文件
+-- ==========================================
+local exportAsync = {
+  phase = "idle",
+  path = "",
+  trackIndex = 0,
+  numTracks = 0,
+  snap = nil,
+  tracksList = nil,
+  jsonStr = nil,
+}
+
+local function exportPhaseReset()
+  exportAsync.phase = "idle"
+  exportAsync.snap = nil
+  exportAsync.tracksList = nil
+  exportAsync.jsonStr = nil
+end
+
+-- 构建顶层元数据（time, tempo, renderConfig）
+-- 从 buildOfficialLikeFromModel 中拆出的轻量部分
+local function exportPhaseMeta()
+  local project = SV:getProject()
+  if not project then
+    exportPhaseReset()
+    return
+  end
+
+  local timeAxis = project:getTimeAxis()
+  local meterList = {}
+  local hasMeterAPI, meterMarks = pcall(function() return timeAxis:getAllMeasureMarks() end)
+  if hasMeterAPI and type(meterMarks) == "table" and #meterMarks > 0 then
+    for _, mark in ipairs(meterMarks) do
+      table.insert(meterList, ordered(
+        {"index", "numerator", "denominator"},
+        { index = mark.position or 0, numerator = mark.numerator or 4, denominator = mark.denominator or 4 }
+      ))
+    end
+  else
+    table.insert(meterList, ordered(
+      {"index", "numerator", "denominator"},
+      { index = 0, numerator = 4, denominator = 4 }
+    ))
+  end
+
+  local tempoList = {}
+  local hasTempoAPI, tempoMarks = pcall(function() return timeAxis:getAllTempoMarks() end)
+  if hasTempoAPI and type(tempoMarks) == "table" and #tempoMarks > 0 then
+    for _, mark in ipairs(tempoMarks) do
+      table.insert(tempoList, ordered(
+        {"position", "bpm"},
+        { position = mark.position or 0, bpm = float(mark.bpm or 120.0) }
+      ))
+    end
+  else
+    table.insert(tempoList, ordered(
+      {"position", "bpm"},
+      { position = 0, bpm = float(120.0) }
+    ))
+  end
+
+  local svpRenderCfg = getSvpRenderConfig()
+  local renderCfg
+  if svpRenderCfg then
+    renderCfg = ordered(
+      {"destination", "filename", "numChannels", "aspirationFormat",
+       "bitDepth", "sampleRate", "exportMixDown", "exportPitch"},
+      {
+        destination      = svpRenderCfg.destination or "",
+        filename         = svpRenderCfg.filename or "",
+        numChannels      = svpRenderCfg.numChannels or 1,
+        aspirationFormat = svpRenderCfg.aspirationFormat or "noAspiration",
+        bitDepth         = svpRenderCfg.bitDepth or 16,
+        sampleRate       = svpRenderCfg.sampleRate or 44100,
+        exportMixDown    = (function() if svpRenderCfg.exportMixDown ~= nil then return svpRenderCfg.exportMixDown else return true end end)(),
+        exportPitch      = (function() if svpRenderCfg.exportPitch ~= nil then return svpRenderCfg.exportPitch else return false end end)()
+      }
+    )
+  else
+    local projFileName = project:getFileName()
+    local renderFilename = ""
+    if projFileName ~= "" then
+      renderFilename = projFileName:match("([^/\\]+)$") or ""
+      renderFilename = renderFilename:match("(.+)%.") or renderFilename
+    end
+    renderCfg = ordered(
+      {"destination", "filename", "numChannels", "aspirationFormat",
+       "bitDepth", "sampleRate", "exportMixDown", "exportPitch"},
+      {
+        destination      = "",
+        filename         = renderFilename,
+        numChannels      = 1,
+        aspirationFormat = "noAspiration",
+        bitDepth         = 16,
+        sampleRate       = 44100,
+        exportMixDown    = true,
+        exportPitch      = false
+      }
+    )
+  end
+
+  exportAsync.numTracks = project:getNumTracks()
+  exportAsync.tracksList = {}
+  exportAsync.snap = ordered(
+    {"version", "time", "library", "tracks", "renderConfig"},
+    {
+      version = getSvpVersion(),
+      time    = ordered(
+        {"meter", "tempo"},
+        { meter = meterList, tempo = tempoList }
+      ),
+      library = {},
+      tracks  = nil,  -- 后续阶段填充
+      renderConfig = renderCfg
+    }
+  )
+
+  exportAsync.trackIndex = 1
+  exportAsync.phase = "track"
+end
+
+-- 构建单个轨道数据（每 tick 处理一个轨道）
+local function exportPhaseTrack()
+  local project = SV:getProject()
+  if not project then
+    exportPhaseReset()
+    return
+  end
+
+  local i = exportAsync.trackIndex
+  if i > exportAsync.numTracks then
+    exportAsync.snap.tracks = exportAsync.tracksList
+    exportAsync.phase = "encode"
+    return
+  end
+
+  local track = project:getTrack(i)
+
+  local mixGain = float(0.0)
+  local mixPan = float(0.0)
+  local mixMute = false
+  local mixSolo = false
+  local hasMixer, mixer = pcall(function() return track:getMixer() end)
+  if hasMixer and mixer then
+    local hasGain, g = pcall(function() return mixer:getGainDecibel() end)
+    if hasGain and g then mixGain = float(g) end
+    local hasPan, p = pcall(function() return mixer:getPan() end)
+    if hasPan and p then mixPan = float(p) end
+    local hasMute, m = pcall(function() return mixer:isMuted() end)
+    if hasMute and m ~= nil then mixMute = m end
+    local hasSolo, s = pcall(function() return mixer:isSolo() end)
+    if hasSolo and s ~= nil then mixSolo = s end
+  end
+
+  local mixerData = ordered(
+    {"gainDecibel", "pan", "mute", "solo", "display"},
+    { gainDecibel = mixGain, pan = mixPan, mute = mixMute, solo = mixSolo,
+      display = getSvpMixerField(i, "display", true) }
+  )
+
+  local trackData = ordered(
+    {"name", "dispColor", "dispOrder", "renderEnabled", "mixer",
+     "mainGroup", "mainRef", "groups"},
+    {
+      name          = track:getName(),
+      dispColor     = (function()
+        local ok, c = pcall(function() return track:getDisplayColor() end)
+        return ok and c or "ff7db235"
+      end)(),
+      dispOrder     = getSvpTrackField(i, "dispOrder", i - 1),
+      renderEnabled = getSvpTrackField(i, "renderEnabled", false),
+      mixer         = mixerData,
+      groups        = {}
+    }
+  )
+
+  local numGroups = track:getNumGroups()
+  if numGroups > 0 then
+    for j = 1, numGroups do
+      local groupRef = track:getGroupReference(j)
+      local group = groupRef:getTarget()
+
+      local notesList = {}
+      local numNotes = group:getNumNotes()
+      for k = 1, numNotes do
+        table.insert(notesList, buildNoteData(group:getNote(k)))
+      end
+
+      local groupData = ordered(
+        {"name", "uuid", "parameters", "vocalModes", "notes"},
+        {
+          name       = group:getName(),
+          uuid       = group:getUUID(),
+          parameters = buildParametersData(group),
+          vocalModes = emptyObject(),
+          notes      = notesList
+        }
+      )
+
+      if j == 1 then
+        trackData.mainGroup = groupData
+        trackData.mainRef   = buildMainRefData(groupRef, group:getUUID(), i)
+      else
+        table.insert(trackData.groups, groupData)
+      end
+    end
+  end
+
+  table.insert(exportAsync.tracksList, trackData)
+  exportAsync.trackIndex = i + 1
+end
+
+-- JSON 序列化阶段
+local function exportPhaseEncode()
+  if not exportAsync.snap then
+    exportPhaseReset()
+    return
+  end
+  exportAsync.jsonStr = json.encode(exportAsync.snap, 2)
+  exportAsync.snap = nil
+  exportAsync.tracksList = nil
+  exportAsync.phase = "write"
+end
+
+-- 文件写入阶段
+local function exportPhaseWrite()
+  if not exportAsync.jsonStr then
+    exportPhaseReset()
+    return
+  end
+  local file, err = io.open(exportAsync.path, "w")
+  if file then
+    file:write(exportAsync.jsonStr)
+    file:close()
+  end
+  exportPhaseReset()
+end
+
+-- 推进一个导出阶段，由 loopTick 每 tick 调用
+-- 返回 true 表示本轮导出仍在进行中
+local function exportTickStep()
+  local phase = exportAsync.phase
+  if phase == "idle" then
+    return false
+  elseif phase == "meta" then
+    exportPhaseMeta()
+    return true
+  elseif phase == "track" then
+    exportPhaseTrack()
+    return true
+  elseif phase == "encode" then
+    exportPhaseEncode()
+    return true
+  elseif phase == "write" then
+    exportPhaseWrite()
+    return false
+  end
+  return false
+end
+
+-- 启动异步导出（设置初始状态，后续由 loopTick 驱动）
+local function startAsyncExport(path, skipSvpReload)
+  if not skipSvpReload then
+    svpFileCache = nil
+  end
+  exportAsync.path = path
+  exportAsync.phase = "meta"
+end
+
+-- 同步导出（首次启动 / 非 loop 场景使用，保持向后兼容）
 local function exportProjectModel(path, skipSvpReload)
   if not skipSvpReload then
-    svpFileCache = nil  -- 非 loop 模式时清空缓存，重新读取 .svp 文件
+    svpFileCache = nil
   end
   local model = buildOfficialLikeFromModel()
   if not model then return false end
-  
-  local jsonStr = json.encode(model)
-  
+
+  local jsonStr = json.encode(model, 2)
+
   local file, err = io.open(path, "w")
   if file then
     file:write(jsonStr)
@@ -1296,6 +1637,7 @@ end
 
 -- 缓存上次成功导入的解析后数据，用于字段级比较
 local lastImportedData = nil
+local importFirstFailTime = nil  -- 首次连续失败的时间戳，nil 表示无故障
 
 local function applyProjectModel(snap)
   local project = SV:getProject()
@@ -1422,27 +1764,51 @@ local function applyProjectModel(snap)
   lastImportedData = snap
 end
 
+local IMPORT_FAIL_TOLERANCE_SEC = 60
+
 local function importFromFile(path)
   local file, err = io.open(path, "r")
-  if not file then return false, string.format("Cannot open %s", path) end
+  if not file then
+    if not importFirstFailTime then
+      importFirstFailTime = getTimestamp()
+    end
+    local elapsed = getTimestamp() - importFirstFailTime
+    if elapsed < IMPORT_FAIL_TOLERANCE_SEC then
+      return false, "File temporarily unavailable, waiting."
+    end
+    importFirstFailTime = nil
+    return false, string.format("Cannot open %s (failed for >%ds)", path, IMPORT_FAIL_TOLERANCE_SEC)
+  end
   
   local jsonStr = file:read("*a")
   file:close()
   
+  if not jsonStr or jsonStr == "" then
+    if not importFirstFailTime then
+      importFirstFailTime = getTimestamp()
+    end
+    local elapsed = getTimestamp() - importFirstFailTime
+    if elapsed < IMPORT_FAIL_TOLERANCE_SEC then
+      return false, "File empty, waiting."
+    end
+    importFirstFailTime = nil
+    return false, "File remained empty for >" .. IMPORT_FAIL_TOLERANCE_SEC .. "s."
+  end
+  
+  importFirstFailTime = nil
+  
   if jsonStr == lastImportedContents then
-    -- 文件没发生过实质性颠覆改变，忽略
     return false, "File not changed by external."
   end
   
-  local snap = json.decode(jsonStr)
-  if type(snap) == "table" then
-    applyProjectModel(snap)
-    -- 更新内容防止死循环反弹
-    lastImportedContents = jsonStr
-    return true, "Import Success"
-  else
+  local ok, snap = pcall(function() return json.decode(jsonStr) end)
+  if not ok or type(snap) ~= "table" then
     return false, "JSON decode failed."
   end
+  
+  applyProjectModel(snap)
+  lastImportedContents = jsonStr
+  return true, "Import Success"
 end
 
 -- ==========================================
@@ -1465,31 +1831,25 @@ local loopTickCount = 0
 local function loopTick()
   if not isLoopModeActive then return end
 
-  -- 检查锁文件是否仍属于本实例；若不是则说明收到停止信号
   if not lockBelongsToMe(currentSessionId) then
     isLoopModeActive = false
     updateSessionState(currentSessionId, "stopped")
-    -- 锁文件已被第二次点击删除，无需再删
     SV:finish()
     return
   end
 
   loopTickCount = loopTickCount + 1
 
-  if workMode == "export" then
-    exportProjectModel(loopOutPath, true)
-  elseif workMode == "import" then
+  if workMode == "import" then
     importFromFile(loopInPath)
   else
-    -- full mode: alternating
-    if loopTickCount % 2 == 1 then
-      exportProjectModel(loopOutPath, true)
-    else
+    startAsyncExport(loopOutPath, true)
+    while exportTickStep() do end
+    if workMode == "full" then
       importFromFile(loopInPath)
     end
   end
 
-  -- Update session timestamp every 20 ticks (reduce disk IO)
   if loopTickCount % 20 == 0 then
     updateSessionTimestamp(currentSessionId)
   end
@@ -1525,6 +1885,9 @@ function main()
     end
     if cfg.workMode and (cfg.workMode == "full" or cfg.workMode == "export" or cfg.workMode == "import") then
       workMode = cfg.workMode
+    end
+    if cfg.endDetectSec and type(cfg.endDetectSec) == "number" and cfg.endDetectSec > 0 then
+      endDetectSec = cfg.endDetectSec
     end
   end
 
@@ -1563,7 +1926,7 @@ function main()
     svpFileCache = nil  -- rebuild for clean model
     local initModel = buildOfficialLikeFromModel()
     if initModel then
-      local initJson = json.encode(initModel)
+      local initJson = json.encode(initModel, 2)
       local f = io.open(inPath, "w")
       if f then
         f:write(initJson)

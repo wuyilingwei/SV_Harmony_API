@@ -17,7 +17,7 @@ The system is split into two scripts:
 | Script | Purpose |
 |--------|---------|
 | **Hormony Bridge** (`HormonyBridge.lua`) | Runtime: starts the bridge loop on click. No UI dialogs. |
-| **Hormony Settings** (`HormonySettings.lua`) | Configuration UI: update interval, work mode, working directory, session cleanup. Saves to `Hormony_Config.json`. |
+| **Hormony Settings** (`HormonySettings.lua`) | Configuration UI: update interval, work mode, end detection silence, working directory, session cleanup. Saves to `Hormony_Config.json`. |
 
 ### Why a Pseudo-Bus?
 
@@ -55,13 +55,18 @@ Synthesizer V's Lua scripting sandbox does not expose sockets, named pipes, or a
 | `{uuid}_in.json` | External --> SV | External program | SV (every tick) |
 | `Hormony_Lock.json` | Toggle signal | Bridge (on start) | Bridge (on click) |
 
-The bridge uses **read/write alternating**: odd ticks export, even ticks import. The full read/write cycle is 2x the configured interval. This halves per-tick blocking time.
+The bridge uses **asynchronous phased export**: each export cycle is split into multiple phases (metadata → one track per tick → JSON encoding → file write), spreading work across several timer ticks to avoid blocking the SV main thread. In Full mode, an import is performed after each export cycle completes.
 
 **Toggle mechanism:** `Hormony_Lock.json` records the active session ID. Clicking Hormony Bridge a second time detects this file and deletes it, which the running loop interprets as a stop signal at the next tick.
 
 ## Features
 
 - **Bidirectional sync** -- export project state and import external modifications in real-time
+- **Async phased export** -- export is split across multiple timer ticks (meta → track → encode → write) to avoid blocking the SV main thread
+- **Segment-based parameter fetching** -- parameter curves are fetched in segments, supporting arbitrarily long songs without a fixed time limit
+- **Configurable end detection** -- export range ends after a configurable silence gap (15s/30s/60s/120s with no notes), eliminating the old ~10-minute hard limit
+- **Pretty-printed JSON** -- output uses indented formatting for git-friendliness and human readability
+- **Resilient import** -- tolerates transient `_in.json` file absence (e.g., during atomic file replacement by external tools) for up to 60 seconds before reporting an error
 - **Work modes** -- Full (alternating export/import), Export Only, or Import Only (configurable in Settings)
 - **Session cleanup** -- stale sessions auto-detected and removable via Settings checkbox
 - **SVP-compatible JSON format** -- output matches the official `.svp` file structure
@@ -70,7 +75,7 @@ The bridge uses **read/write alternating**: odd ticks export, even ticks import.
 - **Session management** -- UUID-based sessions with auto-expiry, tracked in `Hormony_Session.json`
 - **Field-level diff import** -- only modifies notes/parameters that actually changed
 - **Change detection** -- only applies imports when file content actually changes
-- **Configurable** -- update interval, work mode, and working directory via the Settings script
+- **Configurable** -- update interval, work mode, end detection silence, and working directory via the Settings script
 - **Localization** -- UI supports English and Simplified Chinese
 
 ## Requirements
@@ -99,14 +104,22 @@ The bridge uses **read/write alternating**: odd ticks export, even ticks import.
 
 1. **Save your project** (`Ctrl+S`) before running the bridge. The script reads the `.svp` file on disk to extract voice library (database) and `systemPitchDelta` data that are not accessible through the scripting API.
 
-2. **(Optional) Configure settings**: From the **Scripts** menu, select **Hormony Settings** to set the update interval, work mode, and working directory. Settings are saved to `Hormony_Config.json`.
+2. **(Optional) Configure settings**: From the **Scripts** menu, select **Hormony Settings** to set the update interval, work mode, end detection silence, and working directory. Settings are saved to `Hormony_Config.json`.
 
    **Work modes:**
    | Mode | Behavior | Use case |
    |------|----------|----------|
-   | **Full** (default) | Alternating export/import (odd tick = export, even tick = import) | Normal bidirectional workflow |
-   | **Export Only** | Export every tick, no import | Read-only external tools (monitoring, analysis) |
+   | **Full** (default) | Async phased export, then import after each export cycle completes | Normal bidirectional workflow |
+   | **Export Only** | Async phased export every cycle, no import | Read-only external tools (monitoring, analysis) |
    | **Import Only** | Import every tick, no export | One-way external control |
+
+   **End Detection Silence:**
+   | Setting | Behavior |
+   |---------|----------|
+   | **15s** | Export range stops 15 seconds after last note |
+   | **30s** (default) | Export range stops 30 seconds after last note |
+   | **60s** | Export range stops 60 seconds after last note |
+   | **120s** | Export range stops 120 seconds after last note |
 
    > **Note:** Export Only / Import Only should only be used if the external script requires it or you know what you are doing. The default Full mode is recommended for most use cases.
 
@@ -180,11 +193,9 @@ The bridge produces JSON structurally identical to the official `.svp` format. T
 
 ## Known Limitations
 
-- **Latency**: Configurable polling interval (default 1s); full cycle is 2x interval due to read/write alternating
-- **Full export per tick**: The entire project is re-serialized every export cycle, not incremental deltas
+- **Latency**: Configurable polling interval (default 1s); in Full mode, one complete export-then-import cycle spans multiple ticks due to phased export
 - **No file locking**: An external program could theoretically read a partially-written file
 - **Voice library**: Database info is read from the saved `.svp` file, not from the live editor. Changing the voice library requires saving the project first
-- **Song length**: Designed for songs up to ~10 minutes (parameter curve range covers ~3000 beats) If your project exceeds this, you may need to increase the `maxBlick` constant in the code and ensure your external tool can handle the larger JSON files
 - **Project switching**: You must stop the session before switching `.svp` projects. Behavior is undefined otherwise
 
 ## Project Structure
