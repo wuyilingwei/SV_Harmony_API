@@ -1,11 +1,12 @@
--- SVPJsonLoopIOBridge.lua
--- Hormony API — JSON 双缓冲环路桥接
--- 核心目标：为 Synthesizer V Studio 创建一个 JSON 格式的环路桥接脚本
--- 使用 SV 编辑器对象模型作为唯一数据源，完全兼容官方 .svp 中的 JSON 结构
+-- HormonyBridge.lua
+-- Hormony API — JSON Loop Bridge (Toggle On/Off)
+-- Pure runtime script: click once to start loop, click again to stop.
+-- No UI dialogs. Reads config from Hormony_Config.json (written by HormonySettings.lua).
+-- Uses a lock file (.hormony_running) to detect running state across isolated script instances.
 
 function getClientInfo()
   return {
-    name = SV:T("Hormony API"),
+    name = SV:T("Hormony Bridge"),
     author = "Wuyilingwei",
     versionNumber = 1,
     minEditorVersion = 65537
@@ -15,11 +16,7 @@ end
 function getTranslations(langCode)
   if langCode == "zh-cn" then
     return {
-      {"Hormony API", "Hormony API"},
-      {"Select Operation Mode", "选择操作模式"},
-      {"Export to JSON", "导出工程为 JSON"},
-      {"Import from JSON", "从 JSON 导入"},
-      {"Start Loop Mode", "启动环路模式 (导出 + 监听导入)"}
+      {"Hormony Bridge", "Hormony 桥接"},
     }
   end
   return {}
@@ -296,23 +293,21 @@ end
 
 
 -- ==========================================
--- 全局状态与配置
+-- Global state & configuration
 -- ==========================================
 local isLoopModeActive = false
-local loopInterval = 1000 -- 每 1000 毫秒循环一次（默认，可通过 UI 修改）
-local lastImportedContents = ""  -- 缓存 {uuid}_in.json 的上次内容，用于检测外部更改
+local loopInterval = 1000 -- default, overridden by Hormony_Config.json
+local lastImportedContents = ""
 local SCRIPT_VERSION = "0.2.0"
 
--- 动态获取 hormony 工作目录：基于 USERPROFILE / HOME 环境变量
+-- Dynamically resolve hormony working directory
 local function resolveHormonyDir()
   local home = os.getenv("USERPROFILE") or os.getenv("HOME")
   if home then
-    -- 统一使用正斜杠
     home = home:gsub("\\", "/")
     if home:sub(-1) ~= "/" then home = home .. "/" end
     return home .. "Documents/Dreamtonics/Synthesizer V Studio/hormony/"
   end
-  -- 后备：尝试从当前工程路径推断
   local ok, proj = pcall(function() return SV:getProject() end)
   if ok and proj then
     local svpPath = proj:getFileName()
@@ -322,26 +317,31 @@ local function resolveHormonyDir()
       if dir then return dir .. "hormony/" end
     end
   end
-  -- 最终后备
   return "D:/hormony/"
 end
 
 local HORMONY_DIR = resolveHormonyDir()
 local SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
-local currentSessionId = nil  -- 当前会话的 UUID
+local CONFIG_FILE_PATH = HORMONY_DIR .. "Hormony_Config.json"
+local LOCK_FILE_PATH = HORMONY_DIR .. ".hormony_running"
+local currentSessionId = nil
 local paramTypeNames = {
   "pitchDelta", "vibratoEnv", "loudness", "tension",
   "breathiness", "voicing", "gender", "toneShift"
 }
 
--- 更新频率选项（毫秒）
-local INTERVAL_OPTIONS = {
-  { label = "15s",  ms = 15000 },
-  { label = "5s",   ms = 5000 },
-  { label = "3s",   ms = 3000 },
-  { label = "1s",   ms = 1000 },
-  { label = "0.5s", ms = 500 },
-}
+-- Read config from Hormony_Config.json (written by HormonySettings.lua)
+-- Returns a table with at least { interval, hormonyDir } or defaults
+local function readConfig()
+  local f = io.open(CONFIG_FILE_PATH, "r")
+  if not f then return nil end
+  local content = f:read("*a")
+  f:close()
+  if not content or content == "" then return nil end
+  local ok, data = pcall(function() return json.decode(content) end)
+  if ok and type(data) == "table" then return data end
+  return nil
+end
 
 -- ==========================================
 -- 工具函数：时间戳 与 UUIDv4
@@ -1368,36 +1368,47 @@ local function importFromFile(path)
 end
 
 -- ==========================================
--- 环路功能（双文件架构 + 读写交替）
--- {uuid}_out.json: SV 持续将当前工程数据写入此文件
--- {uuid}_in.json:  SV 监控此文件，检测到外部更改时应用到工程
--- 所有文件位于 hormony/ 工作目录下
+-- Loop engine (dual-file + read/write alternating)
+-- {uuid}_out.json: SV continuously writes current project data
+-- {uuid}_in.json:  SV monitors for external changes, applies diffs
+-- All files in hormony/ working directory
 --
--- 读写交替策略：
---   奇数 tick → 导出（export）
---   偶数 tick → 导入（import）
--- 这样每个 tick 只执行一半工作量，降低单次阻塞时间
--- 实际的读写间隔 = loopInterval（用户选择的间隔仍为两次操作间的间距）
+-- Alternating strategy:
+--   odd tick  -> export
+--   even tick -> import
+-- Full read/write cycle = 2 x loopInterval
 -- ==========================================
-local loopOutPath = ""  -- 缓存路径，避免每 tick 重新计算
+local loopOutPath = ""
 local loopInPath  = ""
 
-local loopTickCount = 0  -- 计数器：交替调度 + 降低 session 更新频率
+local loopTickCount = 0
 
 local function loopTick()
+  -- Check lock file: if deleted externally, stop gracefully
+  local lockCheck = io.open(LOCK_FILE_PATH, "r")
+  if not lockCheck then
+    isLoopModeActive = false
+    if currentSessionId then
+      updateSessionState(currentSessionId, "stopped")
+    end
+    SV:finish()
+    return
+  end
+  lockCheck:close()
+
   if not isLoopModeActive then return end
   
   loopTickCount = loopTickCount + 1
   
   if loopTickCount % 2 == 1 then
-    -- 奇数 tick: 导出（loop 模式下跳过 .svp 重读，使用缓存）
+    -- odd tick: export (skip .svp re-read in loop mode, use cache)
     exportProjectModel(loopOutPath, true)
   else
-    -- 偶数 tick: 导入
+    -- even tick: import
     importFromFile(loopInPath)
   end
   
-  -- 每 20 个 tick 更新一次 session 时间戳（减少磁盘 IO）
+  -- Update session timestamp every 20 ticks (reduce disk IO)
   if loopTickCount % 20 == 0 then
     updateSessionTimestamp(currentSessionId)
   end
@@ -1405,141 +1416,123 @@ local function loopTick()
   SV:setTimeout(loopInterval, loopTick)
 end
 
+-- ==========================================
+-- Lock file management
+-- The lock file (.hormony_running) stores the session UUID of the
+-- currently running loop. Since SV scripts are fully isolated
+-- (no shared memory), this is the only way to coordinate start/stop.
+-- ==========================================
+
+-- Read lock file: returns session UUID string, or nil if not running
+local function readLockFile()
+  local f = io.open(LOCK_FILE_PATH, "r")
+  if not f then return nil end
+  local content = f:read("*a")
+  f:close()
+  if content and content ~= "" then
+    return content:match("^%S+")  -- first token = UUID
+  end
+  return nil
+end
+
+-- Write lock file with session UUID
+local function writeLockFile(uuid)
+  local f = io.open(LOCK_FILE_PATH, "w")
+  if not f then return false end
+  f:write(uuid)
+  f:close()
+  return true
+end
+
+-- Delete lock file
+local function deleteLockFile()
+  os.remove(LOCK_FILE_PATH)
+end
+
+-- ==========================================
+-- Main: Toggle On/Off (no UI dialogs)
+-- Click once -> start loop
+-- Click again -> stop loop (via lock file)
+-- ==========================================
 function main()
-  -- 确保 hormony 工作目录可用
+  -- Ensure hormony working directory is accessible
   local dirOk = ensureHormonyDir()
-  local dirHint = ""
   if not dirOk then
-    dirHint = "\n\n[!] 无法访问 hormony 工作目录: " .. HORMONY_DIR
-      .. "\n    请手动创建此目录后重试。"
+    SV:showMessageBox("Error",
+      "Cannot access hormony working directory:\n" .. HORMONY_DIR
+      .. "\n\nPlease create this directory manually or run Hormony Settings first.")
+    SV:finish()
+    return
   end
 
-  -- 预先尝试加载 .svp 文件，生成提示信息
+  -- Check if a loop is already running (lock file exists)
+  local runningUUID = readLockFile()
+  if runningUUID then
+    -- STOP: delete lock file, update session state
+    -- The running loop instance will detect the missing lock file on its next tick
+    -- and stop itself gracefully.
+    deleteLockFile()
+    updateSessionState(runningUUID, "stopped")
+    SV:finish()
+    return
+  end
+
+  -- START: read config, register session, create lock file, begin loop
+
+  -- Load config from Hormony_Config.json (written by HormonySettings.lua)
+  local cfg = readConfig()
+  if cfg then
+    if cfg.interval and type(cfg.interval) == "number" then
+      loopInterval = cfg.interval
+    end
+    if cfg.hormonyDir and type(cfg.hormonyDir) == "string" and cfg.hormonyDir ~= "" then
+      -- Allow config to override the working directory
+      HORMONY_DIR = cfg.hormonyDir
+      SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
+      CONFIG_FILE_PATH = HORMONY_DIR .. "Hormony_Config.json"
+      LOCK_FILE_PATH = HORMONY_DIR .. ".hormony_running"
+    end
+  end
+
+  -- Pre-load .svp file for database/systemPitchDelta
   svpFileCache = nil
   svpLoadError = ""
-  local svpData = loadSvpFile()
-  local svpHint = ""
-  if not svpData then
-    svpHint = "\n\n[!] " .. svpLoadError
-    svpHint = svpHint .. "\n    database（声库）和 systemPitchDelta（自动音高曲线）将为空。"
-  else
-    svpHint = "\n\n[i] 受限于脚本 API，database 和 systemPitchDelta 将从 .svp 源文件读取。"
-    svpHint = svpHint .. "\n    更改声库后请先保存工程（Ctrl+S）再导出。"
-  end
+  loadSvpFile()
 
-  -- 构建频率选项标签
-  local intervalChoices = {}
-  for _, opt in ipairs(INTERVAL_OPTIONS) do
-    table.insert(intervalChoices, opt.label)
-  end
+  -- Register session (generates UUID and bridge file paths)
+  local uuid, outPath, inPath = registerSession()
+  currentSessionId = uuid
 
-  local form = {
-    title = SV:T("Select Operation Mode"),
-    message = "Hormony v" .. SCRIPT_VERSION
-      .. "\nWorking directory: " .. HORMONY_DIR
-      .. "\nSession file: " .. SESSION_FILE_PATH
-      .. dirHint
-      .. svpHint
-      .. "\n\n[i] Loop Mode 采用读写交替策略，每个 tick 只执行导出或导入其中之一。"
-      .. "\n    完整读写周期 = 2 x 间隔时间。大工程建议使用 3s 或更低的频率。",
-    buttons = "OkCancel",
-    widgets = {
-      {
-        name = "mode",
-        type = "ComboBox",
-        label = SV:T("Select Operation Mode"),
-        choices = {SV:T("Start Loop Mode"), SV:T("Export to JSON"), SV:T("Import from JSON")},
-        default = 0
-      },
-      {
-        name = "interval",
-        type = "ComboBox",
-        label = "Update Interval",
-        choices = intervalChoices,
-        default = 3  -- 默认 1s
-      }
-    }
-  }
-
-  local results = SV:showCustomDialog(form)
-  if results.status then
-    local mode = results.answers.mode
-    -- 读取用户选择的更新频率
-    local intervalIdx = results.answers.interval + 1  -- 0-based → 1-based
-    if INTERVAL_OPTIONS[intervalIdx] then
-      loopInterval = INTERVAL_OPTIONS[intervalIdx].ms
-    end
-
-    if mode == 0 then
-      -- Loop Mode (default)
-      if not dirOk then
-        SV:showMessageBox("Error", "hormony 工作目录不可用，无法启动 Loop Mode。\n" .. HORMONY_DIR)
-        SV:finish()
-        return
-      end
-
-      -- 1. 注册 session（生成 UUID 和 bridge 文件路径）
-      local uuid, outPath, inPath = registerSession()
-      currentSessionId = uuid
-
-      -- 2. 导出当前工程到 {uuid}_out.json
-      exportProjectModel(outPath)
-      
-      -- 3. 创建 {uuid}_in.json（用同样的当前工程数据初始化）
-      --    同时建立 diff 基线：lastImportedContents 和 lastImportedData
-      svpFileCache = nil  -- 重新构建以获取干净的模型
-      local initModel = buildOfficialLikeFromModel()
-      if initModel then
-        local initJson = json.encode(initModel)
-        local f = io.open(inPath, "w")
-        if f then
-          f:write(initJson)
-          f:close()
-        end
-        -- 设置 diff 基线
-        lastImportedContents = initJson
-        -- 解析一份干净的数据副本作为 diff 参照
-        lastImportedData = json.decode(initJson)
-      end
-      
-      -- 4. 启动循环（静默，无弹窗）
-      isLoopModeActive = true
-      loopOutPath = outPath
-      loopInPath  = inPath
-      loopTickCount = 0
-      loopTick()
-    elseif mode == 1 then
-      -- One-shot Export: 使用一次性 UUID 命名
-      if not dirOk then
-        SV:showMessageBox("Error", "hormony 工作目录不可用。\n" .. HORMONY_DIR)
-        SV:finish()
-        return
-      end
-      local uuid = generateUUIDv4()
-      local outPath = HORMONY_DIR .. uuid .. "_out.json"
-      exportProjectModel(outPath)
-    elseif mode == 2 then
-      -- One-shot Import: 让用户知道需要指定文件
-      -- 从 hormony 目录中读取最新的 *_in.json
-      if not dirOk then
-        SV:showMessageBox("Error", "hormony 工作目录不可用。\n" .. HORMONY_DIR)
-        SV:finish()
-        return
-      end
-      -- 提示用户输入要导入的文件名
-      local importPath = SV:showInputBox("Import", "请输入 hormony 目录下要导入的文件名\n（如 xxxxxxxx_in.json）:", "")
-      if importPath and importPath ~= "" then
-        local fullPath = HORMONY_DIR .. importPath
-        importFromFile(fullPath)
-      end
-    end
-  end
-  
-  if not isLoopModeActive then
-    -- 脚本结束时，如果有 session 则标记为 stopped
-    if currentSessionId then
-      updateSessionState(currentSessionId, "stopped")
-    end
+  -- Write lock file
+  if not writeLockFile(uuid) then
+    SV:showMessageBox("Error", "Failed to create lock file:\n" .. LOCK_FILE_PATH)
+    updateSessionState(uuid, "stopped")
     SV:finish()
+    return
   end
+
+  -- Initial export to {uuid}_out.json
+  exportProjectModel(outPath)
+
+  -- Create {uuid}_in.json with current project data (establishes diff baseline)
+  svpFileCache = nil  -- rebuild for clean model
+  local initModel = buildOfficialLikeFromModel()
+  if initModel then
+    local initJson = json.encode(initModel)
+    local f = io.open(inPath, "w")
+    if f then
+      f:write(initJson)
+      f:close()
+    end
+    -- Set diff baseline
+    lastImportedContents = initJson
+    lastImportedData = json.decode(initJson)
+  end
+
+  -- Start loop (silent, no popups)
+  isLoopModeActive = true
+  loopOutPath = outPath
+  loopInPath  = inPath
+  loopTickCount = 0
+  loopTick()
 end

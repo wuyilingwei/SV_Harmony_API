@@ -12,6 +12,13 @@ A file-based bridge API that extends Synthesizer V Studio's Lua scripting interf
 
 SV_Harmony_API provides a JSON Loop IO Bridge that runs inside Synthesizer V Studio as a Lua script. It continuously exports the live project state to a JSON file and monitors a second JSON file for incoming changes from external programs. This pseudo-bus architecture allows any external tool -- written in Python, C#, Node.js, or any language -- to read, manipulate, and write back project data (notes, parameters, tracks, tempo, etc.) while SV is running.
 
+The system is split into two scripts:
+
+| Script | Purpose |
+|--------|---------|
+| **Hormony Bridge** (`HormonyBridge.lua`) | Runtime toggle: click once to start the loop, click again to stop. No UI dialogs. |
+| **Hormony Settings** (`HormonySettings.lua`) | Configuration UI: set update interval, working directory, etc. Saves to `Hormony_Config.json`. |
+
 ### Why a Pseudo-Bus?
 
 Synthesizer V's Lua scripting sandbox does not expose sockets, named pipes, or any network/IPC primitives. The only available I/O is `io.open()` for local files and `SV:setTimeout()` for scheduling. SV_Harmony_API leverages these two primitives to build a poll-based, dual-file IPC channel using the local filesystem as the communication medium.
@@ -23,35 +30,43 @@ Synthesizer V's Lua scripting sandbox does not expose sockets, named pipes, or a
 |   Synthesizer V Studio     |          |   External Program         |
 |                            |          |   (Python, C#, etc.)       |
 |  +----------------------+  |          |  +----------------------+  |
-|  | SVPJsonLoopIOBridge   |  |          |  | Reads/writes JSON    |  |
-|  | (Lua script)          |  |          |  |                      |  |
+|  | Hormony Bridge       |  |          |  | Reads/writes JSON    |  |
+|  | (HormonyBridge.lua)  |  |          |  |                      |  |
 |  +------+----------+----+  |          |  +----+-----------+-----+  |
 |         |          ^        |          |       ^           |        |
 +---------+----------|-------+          +-------|-----------|-------+
           |          |                          |           |
           v          |                          |           v
-   bridge_out.json   |                          |    bridge_in.json
-   (SV --> External) |                          |    (External --> SV)
-                     +--------------------------+
+   {uuid}_out.json   |                          |    {uuid}_in.json
+   (SV --> External)  |                          |    (External --> SV)
+                      +--------------------------+
+
+                    hormony/ working directory
+                    (default: ~/Documents/Dreamtonics/Synthesizer V Studio/hormony/)
 ```
+
+**Session-based file naming:** Each loop session generates a unique UUID. Bridge files are named `{uuid}_out.json` and `{uuid}_in.json` in the hormony working directory. Session metadata is tracked in `Hormony_Session.json`.
 
 **Two bridge files prevent read/write collisions:**
 
 | File | Direction | Writer | Reader |
 |------|-----------|--------|--------|
-| `bridge_out.json` | SV --> External | SV (every tick) | External program |
-| `bridge_in.json` | External --> SV | External program | SV (every tick) |
+| `{uuid}_out.json` | SV --> External | SV (every tick) | External program |
+| `{uuid}_in.json` | External --> SV | External program | SV (every tick) |
 
-The bridge polls every 1000ms. On each tick it exports the full project state and checks `bridge_in.json` for changes (via string comparison against a cache) to avoid feedback loops.
+The bridge uses **read/write alternating**: odd ticks export, even ticks import. The full read/write cycle is 2x the configured interval. This halves per-tick blocking time.
 
 ## Features
 
 - **Bidirectional sync** -- export project state and import external modifications in real-time
+- **Toggle on/off** -- click to start, click again to stop (no UI dialogs during runtime)
 - **SVP-compatible JSON format** -- output matches the official `.svp` file structure
 - **Full project coverage** -- notes, 8 parameter curves (pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, gender, toneShift), tempo, time signatures, mixer settings, render config
 - **Zero dependencies** -- includes a built-in pure-Lua JSON encoder/decoder
-- **Three operating modes** -- Loop Mode (continuous), one-shot Export, one-shot Import
+- **Session management** -- UUID-based sessions with auto-expiry, tracked in `Hormony_Session.json`
+- **Field-level diff import** -- only modifies notes/parameters that actually changed
 - **Change detection** -- only applies imports when file content actually changes
+- **Configurable** -- update interval and working directory via the Settings script
 - **Localization** -- UI supports English and Simplified Chinese
 
 ## Requirements
@@ -62,35 +77,45 @@ The bridge polls every 1000ms. On each tick it exports the full project state an
 
 ## Installation
 
-1. Copy `SVPJsonLoopIOBridge.lua` into your Synthesizer V Studio scripts directory:
+1. Copy both scripts into your Synthesizer V Studio scripts directory:
+   ```
+   HormonyBridge.lua          (Hormony Bridge - runtime)
+   HormonySettings.lua       (Hormony Settings - configuration)
+   ```
+   Place them in:
    ```
    <SV Install Dir>/scripts/
    ```
    or a subdirectory (e.g., `scripts/Utilities/`).
 
-2. In Synthesizer V Studio, go to **Scripts > Rescan** to detect the new script.
+2. In Synthesizer V Studio, go to **Scripts > Rescan** to detect the new scripts.
 
 ## Usage
 
 1. **Save your project** (`Ctrl+S`) before running the bridge. The script reads the `.svp` file on disk to extract voice library (database) and `systemPitchDelta` data that are not accessible through the scripting API.
 
-2. From the **Scripts** menu, select **JSON Loop IO Bridge** (category: IO).
+2. **(Optional) Configure settings**: From the **Scripts** menu, select **Hormony Settings** to set the update interval and working directory. Settings are saved to `Hormony_Config.json`.
 
-3. Choose an operating mode:
+3. **Start the bridge**: From the **Scripts** menu, select **Hormony Bridge**. The loop starts immediately (no dialog). The hormony working directory will be created automatically if needed.
 
-   | Mode | Behavior |
-   |------|----------|
-   | **Start Loop Mode** | Continuously exports project state and monitors for external changes. Runs until you stop scripts in SV. |
-   | **Export to JSON** | One-shot export to `bridge_out.json`. |
-   | **Import from JSON** | One-shot import from `bridge_in.json`. |
+4. **Stop the bridge**: Click **Hormony Bridge** again. The script detects the running loop via a lock file (`.hormony_running`) and stops it.
 
-4. **For external program integration**, write your tool to:
-   - **Read** `bridge_out.json` to get the current SV project state
-   - **Write** `bridge_in.json` to push changes back into SV
+5. **For external program integration**, write your tool to:
+   - Read `Hormony_Session.json` to discover the active session UUID and file paths
+   - **Read** `{uuid}_out.json` to get the current SV project state
+   - **Write** `{uuid}_in.json` to push changes back into SV
+
+> **WARNING: Switching .svp projects while a session is running**
+>
+> You **must** stop the bridge (click Hormony Bridge to toggle off) before opening or switching to a different `.svp` project. The session is bound to the project that was active when it started. If you switch projects without stopping first, the bridge will continue exporting/importing against the wrong project context. The resulting behavior is undefined -- you have been warned.
 
 ### Bridge File Location
 
-Bridge files are created in the same directory as the saved `.svp` project file. If the project is unsaved or the path is not writable (e.g., Unicode path issues), files fall back to `D:/`.
+Bridge files are created in the **hormony working directory**:
+```
+~/Documents/Dreamtonics/Synthesizer V Studio/hormony/
+```
+This can be overridden in Hormony Settings. The directory is created automatically on first run.
 
 ## JSON Data Format
 
@@ -132,17 +157,19 @@ The bridge produces JSON structurally identical to the official `.svp` format. T
 
 ## Known Limitations
 
-- **Latency**: 1-second polling interval; changes are reflected with up to 1s delay
-- **Full export per tick**: The entire project is re-serialized every cycle, not incremental deltas
-- **Import overwrites**: Import replaces all notes in the main group; no merge/diff logic
+- **Latency**: Configurable polling interval (default 1s); full cycle is 2x interval due to read/write alternating
+- **Full export per tick**: The entire project is re-serialized every export cycle, not incremental deltas
 - **No file locking**: An external program could theoretically read a partially-written file
 - **Main group only**: Import only processes `mainGroup` of each track; additional groups are exported but not imported back
 - **Voice library**: Database info is read from the saved `.svp` file, not from the live editor. Changing the voice library requires saving the project first
+- **Song length**: Designed for songs up to ~10 minutes (parameter curve range covers ~3000 beats)
+- **Project switching**: You must stop the session before switching `.svp` projects. Behavior is undefined otherwise
 
 ## Project Structure
 
 ```
-SVPJsonLoopIOBridge.lua    # Core bridge script
+HormonyBridge.lua          # Runtime bridge (toggle on/off)
+HormonySettings.lua        # Settings UI (persists to Hormony_Config.json)
 Test_Loop.lua              # Proof-of-concept file-polling loop
 test_io.lua                # Basic file I/O validation test
 LICENSE.txt                # ALE 1.1 + GPL v3.0 dual license
