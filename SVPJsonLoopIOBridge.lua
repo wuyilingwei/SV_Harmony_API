@@ -6,7 +6,6 @@
 function getClientInfo()
   return {
     name = SV:T("Hormony API"),
-    category = "Hormony API",
     author = "User",
     versionNumber = 1,
     minEditorVersion = 65537
@@ -369,6 +368,46 @@ local function generateUUIDv4()
 end
 
 -- ==========================================
+-- hormony 工作目录与 bridge 路径
+-- ==========================================
+
+-- 确保 hormony 工作目录存在（自动创建）
+-- 返回 true 表示目录可用，false 表示无法创建/写入
+local function ensureHormonyDir()
+  -- 先测试目录是否已可用
+  local testPath = HORMONY_DIR .. ".hormony_test"
+  local f = io.open(testPath, "w")
+  if f then
+    f:write("")
+    f:close()
+    os.remove(testPath)
+    return true
+  end
+  -- 目录不存在，尝试自动创建
+  local ok = os.execute('mkdir "' .. HORMONY_DIR:gsub("/", "\\") .. '" 2>nul')
+  if ok then
+    -- 再次验证
+    f = io.open(testPath, "w")
+    if f then
+      f:write("")
+      f:close()
+      os.remove(testPath)
+      return true
+    end
+  end
+  return false
+end
+
+-- 根据 UUID 生成 bridge 文件路径
+-- uuid: 会话 UUID
+-- 返回两个路径: outPath (SV -> 外部), inPath (外部 -> SV)
+local function getBridgePaths(uuid)
+  local outPath = HORMONY_DIR .. uuid .. "_out.json"
+  local inPath  = HORMONY_DIR .. uuid .. "_in.json"
+  return outPath, inPath
+end
+
+-- ==========================================
 -- Hormony_Session 管理
 -- 文件位置: hormony/Hormony_Session.json
 -- 格式: JSON 数组，每个元素为一个 session 记录
@@ -514,32 +553,6 @@ local function updateSessionState(sessionId, newState)
     end
   end
   writeSessionFile(sessions)
-end
-
--- 确保 hormony 工作目录存在
--- 返回 true 表示目录可用，false 表示无法创建/写入
-local function ensureHormonyDir()
-  -- 尝试在目录下写一个临时文件来测试可用性
-  local testPath = HORMONY_DIR .. ".hormony_test"
-  local f = io.open(testPath, "w")
-  if f then
-    f:write("")
-    f:close()
-    os.remove(testPath)
-    return true
-  end
-  -- 目录可能不存在，尝试通过写文件隐式创建（Lua 标准库无 mkdir）
-  -- 如果 io.open 失败，说明目录不存在且无法创建
-  return false
-end
-
--- 根据 UUID 生成 bridge 文件路径
--- uuid: 会话 UUID
--- 返回两个路径: outPath (SV -> 外部), inPath (外部 -> SV)
-local function getBridgePaths(uuid)
-  local outPath = HORMONY_DIR .. uuid .. "_out.json"
-  local inPath  = HORMONY_DIR .. uuid .. "_in.json"
-  return outPath, inPath
 end
 
 -- ==========================================
