@@ -579,9 +579,7 @@ function main()
     }
 
     local ok = writeConfig(newCfg)
-    if ok then
-      SV:showMessageBox(SV:T("Hormony Settings"), SV:T("Settings saved."))
-    else
+    if not ok then
       SV:showMessageBox(SV:T("Error"), SV:T("Failed to write config file:") .. "\n" .. CONFIG_FILE_PATH)
     end
 
