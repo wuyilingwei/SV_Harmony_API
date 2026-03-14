@@ -27,19 +27,12 @@ end
 -- ==========================================
 local json = {}
 
--- 标记表：用于区分空对象 {} 和空数组 []
--- Lua 中空表无法区分，需要额外标记
 local EMPTY_OBJECT_MARKER = "__json_empty_object__"
+local RAW_JSON_MARKER     = "__json_raw__"
 
--- 创建一个会被序列化为 {} 的空表
-local function emptyObject()
-  return { [EMPTY_OBJECT_MARKER] = true }
-end
-
--- 创建一个会被序列化为 [] 的空表 (默认)
-local function emptyArray()
-  return {}
-end
+local function emptyObject() return { [EMPTY_OBJECT_MARKER] = true } end
+local function emptyArray()  return {} end
+local function rawJson(s)    return { [RAW_JSON_MARKER] = s } end
 
 local function escape_str(s)
   s = s:gsub('\\', '\\\\')
@@ -82,16 +75,19 @@ local function float(v)
   return { [FLOAT_MARKER] = v }
 end
 
--- json.encode(val [, indent [, _depth]])
--- indent: 缩进空格数（nil 或 0 表示紧凑模式，>0 表示松散/pretty 模式）
--- _depth: 内部递归深度，外部调用时不要传
+local _indentCache = {}
+local function getIndent(spaces)
+  local s = _indentCache[spaces]
+  if not s then s = string.rep(" ", spaces); _indentCache[spaces] = s end
+  return s
+end
+
 function json.encode(val, indent, _depth)
   indent = indent or 0
   _depth = _depth or 0
   local pretty = indent > 0
   local t = type(val)
   if t == "number" then
-    -- 使用高精度格式化，%.16g 提供 16 位有效数字
     if val == math.floor(val) and val < 2147483647 and val > -2147483647 then
       return tostring(math.floor(val))
     else
@@ -102,76 +98,62 @@ function json.encode(val, indent, _depth)
   elseif t == "string" then
     return '"' .. escape_str(val) .. '"'
   elseif t == "table" then
-    -- 检查是否为浮点数标记
     if val[FLOAT_MARKER] ~= nil then
       local fv = val[FLOAT_MARKER]
       local s = string.format("%.16g", fv)
-      -- 确保有小数点（如 0.0 而非 0）
-      if not s:find("%.") and not s:find("[eE]") then
-        s = s .. ".0"
-      end
+      if not s:find("%.") and not s:find("[eE]") then s = s .. ".0" end
       return s
     end
-    
-    -- 检查是否标记为空对象
-    if val[EMPTY_OBJECT_MARKER] then
-      return "{}"
-    end
-    
+
+    if val[RAW_JSON_MARKER]     then return val[RAW_JSON_MARKER] end
+    if val[EMPTY_OBJECT_MARKER] then return "{}" end
+
     local child_depth = _depth + 1
-    local cur_indent = pretty and string.rep(" ", indent * _depth) or ""
-    local child_indent = pretty and string.rep(" ", indent * child_depth) or ""
-    local nl = pretty and "\n" or ""
+    local cur_indent   = pretty and getIndent(indent * _depth)      or ""
+    local child_indent = pretty and getIndent(indent * child_depth) or ""
+    local nl  = pretty and "\n" or ""
     local sep = pretty and ",\n" or ","
     local kv_sep = pretty and ": " or ":"
-    
-    -- 检查是否为有序键表（通过 __key_order 元数据）
+
     local key_order = val["__key_order__"]
     if key_order then
       local parts = {}
       local used = { __key_order__ = true }
       for _, k in ipairs(key_order) do
         if val[k] ~= nil then
-          table.insert(parts, child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(val[k], indent, child_depth))
+          parts[#parts+1] = child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(val[k], indent, child_depth)
           used[k] = true
         end
       end
       for k, v in pairs(val) do
         if type(k) == "string" and not used[k] then
-          table.insert(parts, child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(v, indent, child_depth))
+          parts[#parts+1] = child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(v, indent, child_depth)
         end
       end
       if #parts == 0 then return "{}" end
       return "{" .. nl .. table.concat(parts, sep) .. nl .. cur_indent .. "}"
     end
-    
+
     local is_array = true
     local max_k = 0
-    for k, v in pairs(val) do
-      if type(k) ~= "number" or k <= 0 or math.floor(k) ~= k then
-        is_array = false
-        break
-      end
+    for k in pairs(val) do
+      if type(k) ~= "number" or k <= 0 or math.floor(k) ~= k then is_array = false; break end
       if k > max_k then max_k = k end
     end
-    
+
     if is_array and max_k > 0 then
       local parts = {}
       for i = 1, max_k do
-        if val[i] == nil then
-          table.insert(parts, child_indent .. "null")
-        else
-          table.insert(parts, child_indent .. json.encode(val[i], indent, child_depth))
-        end
+        parts[i] = child_indent .. (val[i] ~= nil and json.encode(val[i], indent, child_depth) or "null")
       end
       return "[" .. nl .. table.concat(parts, sep) .. nl .. cur_indent .. "]"
     elseif next(val) == nil then
-      return "[]"  -- 默认空表为空数组
+      return "[]"
     else
       local parts = {}
       for k, v in pairs(val) do
         if type(k) == "string" then
-          table.insert(parts, child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(v, indent, child_depth))
+          parts[#parts+1] = child_indent .. '"' .. escape_str(k) .. '"' .. kv_sep .. json.encode(v, indent, child_depth)
         end
       end
       if #parts == 0 then return "{}" end
@@ -311,7 +293,8 @@ end
 -- Global state & configuration
 -- ==========================================
 local isLoopModeActive = false
-local loopInterval = 1000 -- default, overridden by Hormony_Config.json
+local loopInterval  = 3000 -- default, overridden by Hormony_Config.json
+local FRAME_INTERVAL = 50  -- ms between export phase steps during active export
 local lastImportedContents = ""
 local SCRIPT_VERSION = "0.3.0"
 
@@ -646,103 +629,138 @@ end
 -- 核心功能 1: 提取编辑器模型数据
 -- ==========================================
 
--- 构建单个音符数据（与官方 .svp 字段顺序一致）
+local _fmtFloat = function(v)
+  local s = string.format("%.16g", v)
+  if not s:find("%.") and not s:find("[eE]") then s = s .. ".0" end
+  return s
+end
+
+local _NOTE_TAKES_JSON = '{"activeTakeId":0,"takes":[{"id":0,"expr":0.0,"liked":false}]}'
+
 local function buildNoteData(note)
-  local hasAttrs, attrs = pcall(function() return note:getAttributes() end)
-  if not hasAttrs or type(attrs) ~= "table" then attrs = {} end
-  -- getAttributes() 返回的是包含 tF0Left/dF0Vbr 等的表
-  -- 官方格式把它们分为 attributes 和 systemAttributes 两部分
-  -- 这里通过 API 只能拿到合并后的属性表
+  local attrs = {}
+  local ok, a = pcall(function() return note:getAttributes() end)
+  if ok and type(a) == "table" then attrs = a end
 
-  -- 官方 note.attributes 中常见的用户属性
-  local userAttrs = ordered(
-    {"evenSyllableDuration"},
-    { evenSyllableDuration = (attrs.evenSyllableDuration == nil) and true or attrs.evenSyllableDuration }
-  )
+  local esd = (attrs.evenSyllableDuration == nil) and true or attrs.evenSyllableDuration
+  local esdStr = esd and "true" or "false"
 
-  -- 官方 note.systemAttributes 中的系统属性
-  -- 所有系统属性值都是浮点数，需要用 float() 包装
-  local tF0OffsetVal = attrs.tF0Offset or 0.0
-  local tF0LeftVal   = attrs.tF0Left   or 0.1000000014901161
-  local tF0RightVal  = attrs.tF0Right  or 0.1000000014901161
-  local dF0LeftVal   = attrs.dF0Left   or 0.0
-  local dF0RightVal  = attrs.dF0Right  or 0.0
-  local dF0VbrVal    = attrs.dF0Vbr    or 0.0
+  local tF0Offset = attrs.tF0Offset or 0.0
+  local tF0Left   = attrs.tF0Left   or 0.1000000014901161
+  local tF0Right  = attrs.tF0Right  or 0.1000000014901161
+  local dF0Left   = attrs.dF0Left   or 0.0
+  local dF0Right  = attrs.dF0Right  or 0.0
+  local dF0Vbr    = attrs.dF0Vbr    or 0.0
 
-  local sysAttrs = ordered(
-    {"tF0Offset", "tF0Left", "tF0Right", "dF0Left", "dF0Right", "dF0Vbr", "evenSyllableDuration"},
-    {
-      tF0Offset  = float(tF0OffsetVal == 0 and -0.0 or tF0OffsetVal),
-      tF0Left    = float(tF0LeftVal),
-      tF0Right   = float(tF0RightVal),
-      dF0Left    = float(dF0LeftVal),
-      dF0Right   = float(dF0RightVal),
-      dF0Vbr     = float(dF0VbrVal),
-      evenSyllableDuration = (attrs.evenSyllableDuration == nil) and true or attrs.evenSyllableDuration
-    }
-  )
-
-  -- 默认 pitchTakes / timbreTakes
-  local defaultTakes = ordered(
-    {"activeTakeId", "takes"},
-    {
-      activeTakeId = 0,
-      takes = {
-        ordered({"id", "expr", "liked"}, { id = 0, expr = float(0.0), liked = false })
-      }
-    }
-  )
-  local defaultTimbreTakes = ordered(
-    {"activeTakeId", "takes"},
-    {
-      activeTakeId = 0,
-      takes = {
-        ordered({"id", "expr", "liked"}, { id = 0, expr = float(0.0), liked = false })
-      }
-    }
-  )
-
-  -- 读取音符的音乐类型
   local musicalType = "singing"
-  local hasMusicalType, mt = pcall(function() return note:getMusicalType() end)
-  if hasMusicalType and mt then
-    if mt == "rap" then musicalType = "rap" end
-  end
+  local ok2, mt = pcall(function() return note:getMusicalType() end)
+  if ok2 and mt == "rap" then musicalType = "rap" end
 
-  -- 读取 accent
   local accent = ""
-  local hasRapAccent, ra = pcall(function() return note:getRapAccent() end)
-  if hasRapAccent and ra and ra ~= "" then
-    accent = ra
-  end
+  local ok3, ra = pcall(function() return note:getRapAccent() end)
+  if ok3 and ra and ra ~= "" then accent = ra end
 
-  -- 读取 detune
   local detune = 0
-  local hasDetune, dt = pcall(function() return note:getDetune() end)
-  if hasDetune and dt then
-    detune = dt
+  local ok4, dt = pcall(function() return note:getDetune() end)
+  if ok4 and dt then detune = dt end
+
+  return {
+    __NOTE_JSON__ = true,
+    musicalType      = musicalType,
+    onset            = note:getOnset(),
+    duration         = note:getDuration(),
+    lyrics           = note:getLyrics(),
+    phonemes         = note:getPhonemes(),
+    accent           = accent,
+    pitch            = note:getPitch(),
+    detune           = detune,
+    esd              = esdStr,
+    tF0Offset        = _fmtFloat(tF0Offset),
+    tF0Left          = _fmtFloat(tF0Left),
+    tF0Right         = _fmtFloat(tF0Right),
+    dF0Left          = _fmtFloat(dF0Left),
+    dF0Right         = _fmtFloat(dF0Right),
+    dF0Vbr           = _fmtFloat(dF0Vbr),
+  }
+end
+
+local function encodeNoteJson(n, indent, depth)
+  local ci  = indent > 0 and getIndent(indent * depth)       or ""
+  local ci1 = indent > 0 and getIndent(indent * (depth + 1)) or ""
+  local ci2 = indent > 0 and getIndent(indent * (depth + 2)) or ""
+  local nl  = indent > 0 and "\n" or ""
+  local kvs = indent > 0 and ": " or ":"
+  local sep = indent > 0 and ",\n" or ","
+
+  local function kv(k, v) return ci1 .. '"' .. k .. '"' .. kvs .. v end
+
+  local lyricsEsc  = escape_str(n.lyrics  or "")
+  local phonEsc    = escape_str(n.phonemes or "")
+  local accentEsc  = escape_str(n.accent   or "")
+
+  local attrStr
+  if indent > 0 then
+    attrStr = "{" .. nl
+      .. ci2 .. '"evenSyllableDuration"' .. kvs .. n.esd .. nl
+      .. ci1 .. "}"
+  else
+    attrStr = '{"evenSyllableDuration":' .. n.esd .. "}"
   end
 
-  return ordered(
-    {"musicalType", "onset", "duration", "lyrics", "phonemes", "accent",
-     "pitch", "detune", "instantMode", "attributes", "systemAttributes",
-     "pitchTakes", "timbreTakes"},
-    {
-      musicalType = musicalType,
-      onset       = note:getOnset(),
-      duration    = note:getDuration(),
-      lyrics      = note:getLyrics(),
-      phonemes    = note:getPhonemes(),
-      accent      = accent,
-      pitch       = note:getPitch(),
-      detune      = 0,
-      instantMode = true,
-      attributes       = userAttrs,
-      systemAttributes = sysAttrs,
-      pitchTakes       = defaultTakes,
-      timbreTakes      = defaultTimbreTakes
-    }
-  )
+  local sysAttrStr
+  if indent > 0 then
+    sysAttrStr = "{" .. nl
+      .. ci2 .. '"tF0Offset"'           .. kvs .. n.tF0Offset  .. sep
+      .. ci2 .. '"tF0Left"'             .. kvs .. n.tF0Left    .. sep
+      .. ci2 .. '"tF0Right"'            .. kvs .. n.tF0Right   .. sep
+      .. ci2 .. '"dF0Left"'             .. kvs .. n.dF0Left    .. sep
+      .. ci2 .. '"dF0Right"'            .. kvs .. n.dF0Right   .. sep
+      .. ci2 .. '"dF0Vbr"'             .. kvs .. n.dF0Vbr     .. sep
+      .. ci2 .. '"evenSyllableDuration"' .. kvs .. n.esd        .. nl
+      .. ci1 .. "}"
+  else
+    sysAttrStr = '{"tF0Offset":' .. n.tF0Offset
+      .. ',"tF0Left":' .. n.tF0Left
+      .. ',"tF0Right":' .. n.tF0Right
+      .. ',"dF0Left":' .. n.dF0Left
+      .. ',"dF0Right":' .. n.dF0Right
+      .. ',"dF0Vbr":' .. n.dF0Vbr
+      .. ',"evenSyllableDuration":' .. n.esd .. "}"
+  end
+
+  local parts = {
+    kv("musicalType", '"' .. n.musicalType .. '"'),
+    kv("onset",       tostring(n.onset)),
+    kv("duration",    tostring(n.duration)),
+    kv("lyrics",      '"' .. lyricsEsc  .. '"'),
+    kv("phonemes",    '"' .. phonEsc    .. '"'),
+    kv("accent",      '"' .. accentEsc  .. '"'),
+    kv("pitch",       tostring(n.pitch)),
+    kv("detune",      tostring(n.detune)),
+    kv("instantMode", "true"),
+    kv("attributes",       attrStr),
+    kv("systemAttributes", sysAttrStr),
+    kv("pitchTakes",       _NOTE_TAKES_JSON),
+    kv("timbreTakes",      _NOTE_TAKES_JSON),
+  }
+  return "{" .. nl .. table.concat(parts, sep) .. nl .. ci .. "}"
+end
+
+local function encodeNotesArray(notesList, indent, depth)
+  if #notesList == 0 then return "[]" end
+  local nl  = indent > 0 and "\n" or ""
+  local sep = indent > 0 and ",\n" or ","
+  local ci  = indent > 0 and getIndent(indent * depth) or ""
+  local parts = {}
+  local noteDepth = depth + 1
+  for _, n in ipairs(notesList) do
+    if n.__NOTE_JSON__ then
+      parts[#parts+1] = (indent > 0 and getIndent(indent * noteDepth) or "") .. encodeNoteJson(n, indent, noteDepth)
+    else
+      parts[#parts+1] = (indent > 0 and getIndent(indent * noteDepth) or "") .. json.encode(n, indent, noteDepth)
+    end
+  end
+  return "[" .. nl .. table.concat(parts, sep) .. nl .. ci .. "]"
 end
 
 -- 计算组内音符覆盖的 blick 范围，用于参数段获取
@@ -1127,14 +1145,12 @@ local function buildOfficialLikeFromModel()
         local groupRef = track:getGroupReference(j)
         local group = groupRef:getTarget()
 
-        -- 构建音符列表
         local notesList = {}
         local numNotes = group:getNumNotes()
         for k = 1, numNotes do
-          table.insert(notesList, buildNoteData(group:getNote(k)))
+          notesList[k] = buildNoteData(group:getNote(k))
         end
 
-        -- 构建组数据
         local groupData = ordered(
           {"name", "uuid", "parameters", "vocalModes", "notes"},
           {
@@ -1142,7 +1158,7 @@ local function buildOfficialLikeFromModel()
             uuid       = group:getUUID(),
             parameters = buildParametersData(group),
             vocalModes = emptyObject(),
-            notes      = notesList
+            notes      = rawJson(encodeNotesArray(notesList, 2, 4))
           }
         )
 
@@ -1414,7 +1430,7 @@ local function exportPhaseTrack()
       local notesList = {}
       local numNotes = group:getNumNotes()
       for k = 1, numNotes do
-        table.insert(notesList, buildNoteData(group:getNote(k)))
+        notesList[k] = buildNoteData(group:getNote(k))
       end
 
       local groupData = ordered(
@@ -1424,7 +1440,7 @@ local function exportPhaseTrack()
           uuid       = group:getUUID(),
           parameters = buildParametersData(group),
           vocalModes = emptyObject(),
-          notes      = notesList
+          notes      = rawJson(encodeNotesArray(notesList, 2, 4))
         }
       )
 
@@ -1838,23 +1854,33 @@ local function loopTick()
     return
   end
 
-  loopTickCount = loopTickCount + 1
-
   if workMode == "import" then
+    loopTickCount = loopTickCount + 1
     importFromFile(loopInPath)
-  else
+    if loopTickCount % 20 == 0 then updateSessionTimestamp(currentSessionId) end
+    SV:setTimeout(loopInterval, loopTick)
+    return
+  end
+
+  local phase = exportAsync.phase
+
+  if phase == "idle" then
+    loopTickCount = loopTickCount + 1
     startAsyncExport(loopOutPath, true)
-    while exportTickStep() do end
-    if workMode == "full" then
-      importFromFile(loopInPath)
+    if loopTickCount % 20 == 0 then updateSessionTimestamp(currentSessionId) end
+    SV:setTimeout(FRAME_INTERVAL, loopTick)
+  else
+    local stillRunning = exportTickStep()
+    if stillRunning then
+      SV:setTimeout(FRAME_INTERVAL, loopTick)
+    else
+      if workMode == "full" then
+        importFromFile(loopInPath)
+      end
+      if loopTickCount % 20 == 0 then updateSessionTimestamp(currentSessionId) end
+      SV:setTimeout(loopInterval, loopTick)
     end
   end
-
-  if loopTickCount % 20 == 0 then
-    updateSessionTimestamp(currentSessionId)
-  end
-
-  SV:setTimeout(loopInterval, loopTick)
 end
 
 -- ==========================================

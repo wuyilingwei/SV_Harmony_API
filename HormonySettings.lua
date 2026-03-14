@@ -287,7 +287,7 @@ local END_DETECT_OPTIONS = {
 
 -- Default config values
 local DEFAULT_CONFIG = {
-  interval = 1000,
+  interval = 3000,
   hormonyDir = HORMONY_DIR,
   workMode = "full",
   scriptVersion = SCRIPT_VERSION,
