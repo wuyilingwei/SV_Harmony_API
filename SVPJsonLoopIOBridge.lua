@@ -301,8 +301,32 @@ end
 local isLoopModeActive = false
 local loopInterval = 1000 -- 每 1000 毫秒循环一次（默认，可通过 UI 修改）
 local lastImportedContents = ""  -- 缓存 {uuid}_in.json 的上次内容，用于检测外部更改
-local HORMONY_DIR = "C:/Users/User/Documents/Dreamtonics/Synthesizer V Studio/hormony/"
-local SCRIPT_VERSION = "0.1.2"
+local SCRIPT_VERSION = "0.2.0"
+
+-- 动态获取 hormony 工作目录：基于 USERPROFILE / HOME 环境变量
+local function resolveHormonyDir()
+  local home = os.getenv("USERPROFILE") or os.getenv("HOME")
+  if home then
+    -- 统一使用正斜杠
+    home = home:gsub("\\", "/")
+    if home:sub(-1) ~= "/" then home = home .. "/" end
+    return home .. "Documents/Dreamtonics/Synthesizer V Studio/hormony/"
+  end
+  -- 后备：尝试从当前工程路径推断
+  local ok, proj = pcall(function() return SV:getProject() end)
+  if ok and proj then
+    local svpPath = proj:getFileName()
+    if svpPath and svpPath ~= "" then
+      svpPath = svpPath:gsub("\\", "/")
+      local dir = svpPath:match("^(.+/)")
+      if dir then return dir .. "hormony/" end
+    end
+  end
+  -- 最终后备
+  return "D:/hormony/"
+end
+
+local HORMONY_DIR = resolveHormonyDir()
 local SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
 local currentSessionId = nil  -- 当前会话的 UUID
 local paramTypeNames = {
@@ -1094,8 +1118,10 @@ local function buildOfficialLikeFromModel()
   return snap
 end
 
-local function exportProjectModel(path)
-  svpFileCache = nil  -- 每次导出时清空缓存，重新读取 .svp 文件
+local function exportProjectModel(path, skipSvpReload)
+  if not skipSvpReload then
+    svpFileCache = nil  -- 非 loop 模式时清空缓存，重新读取 .svp 文件
+  end
   local model = buildOfficialLikeFromModel()
   if not model then return false end
   
@@ -1338,28 +1364,37 @@ local function importFromFile(path)
 end
 
 -- ==========================================
--- 环路功能（双文件架构）
+-- 环路功能（双文件架构 + 读写交替）
 -- {uuid}_out.json: SV 持续将当前工程数据写入此文件
 -- {uuid}_in.json:  SV 监控此文件，检测到外部更改时应用到工程
 -- 所有文件位于 hormony/ 工作目录下
+--
+-- 读写交替策略：
+--   奇数 tick → 导出（export）
+--   偶数 tick → 导入（import）
+-- 这样每个 tick 只执行一半工作量，降低单次阻塞时间
+-- 实际的读写间隔 = loopInterval（用户选择的间隔仍为两次操作间的间距）
 -- ==========================================
 local loopOutPath = ""  -- 缓存路径，避免每 tick 重新计算
 local loopInPath  = ""
 
-local loopTickCount = 0  -- 计数器：用于降低 session 更新频率
+local loopTickCount = 0  -- 计数器：交替调度 + 降低 session 更新频率
 
 local function loopTick()
   if not isLoopModeActive then return end
   
-  -- 1. 检查 {uuid}_in.json 是否被外部工具修改，如有则导入
-  importFromFile(loopInPath)
-  
-  -- 2. 持续将当前 SV 工程状态写入 {uuid}_out.json
-  exportProjectModel(loopOutPath)
-  
-  -- 3. 定期更新 session 时间戳（每 10 个 tick 更新一次，减少磁盘 IO）
   loopTickCount = loopTickCount + 1
-  if loopTickCount % 10 == 0 then
+  
+  if loopTickCount % 2 == 1 then
+    -- 奇数 tick: 导出（loop 模式下跳过 .svp 重读，使用缓存）
+    exportProjectModel(loopOutPath, true)
+  else
+    -- 偶数 tick: 导入
+    importFromFile(loopInPath)
+  end
+  
+  -- 每 20 个 tick 更新一次 session 时间戳（减少磁盘 IO）
+  if loopTickCount % 20 == 0 then
     updateSessionTimestamp(currentSessionId)
   end
   
@@ -1401,8 +1436,8 @@ function main()
       .. "\nSession file: " .. SESSION_FILE_PATH
       .. dirHint
       .. svpHint
-      .. "\n\n[!] 大工程使用较高刷新频率（如 0.5s、1s）可能导致性能下降。"
-      .. "\n    建议大工程使用 3s 或更低的频率。",
+      .. "\n\n[i] Loop Mode 采用读写交替策略，每个 tick 只执行导出或导入其中之一。"
+      .. "\n    完整读写周期 = 2 x 间隔时间。大工程建议使用 3s 或更低的频率。",
     buttons = "OkCancel",
     widgets = {
       {
@@ -1463,18 +1498,11 @@ function main()
         lastImportedData = json.decode(initJson)
       end
       
-      -- 4. 启动循环
+      -- 4. 启动循环（静默，无弹窗）
       isLoopModeActive = true
       loopOutPath = outPath
       loopInPath  = inPath
       loopTickCount = 0
-      SV:showMessageBox("Info",
-        "Loop Mode started.\n"
-        .. "Press 'Stop Scripts' in Synthesizer V to kill it.\n\n"
-        .. "Session ID: " .. uuid .. "\n"
-        .. "Update interval: " .. INTERVAL_OPTIONS[intervalIdx].label .. "\n\n"
-        .. "OUT (SV -> External):\n" .. outPath .. "\n\n"
-        .. "IN  (External -> SV):\n" .. inPath)
       loopTick()
     elseif mode == 1 then
       -- One-shot Export: 使用一次性 UUID 命名
@@ -1485,11 +1513,7 @@ function main()
       end
       local uuid = generateUUIDv4()
       local outPath = HORMONY_DIR .. uuid .. "_out.json"
-      if exportProjectModel(outPath) then
-        SV:showMessageBox("Success", "Export successful!\n" .. outPath)
-      else
-        SV:showMessageBox("Error", "Export failed for path:\n" .. outPath)
-      end
+      exportProjectModel(outPath)
     elseif mode == 2 then
       -- One-shot Import: 让用户知道需要指定文件
       -- 从 hormony 目录中读取最新的 *_in.json
@@ -1502,12 +1526,7 @@ function main()
       local importPath = SV:showInputBox("Import", "请输入 hormony 目录下要导入的文件名\n（如 xxxxxxxx_in.json）:", "")
       if importPath and importPath ~= "" then
         local fullPath = HORMONY_DIR .. importPath
-        local ok, err_msg = importFromFile(fullPath)
-        if ok then
-          SV:showMessageBox("Success", "Import successful!\n" .. fullPath)
-        else
-          SV:showMessageBox("Info", "Import Info:\n" .. err_msg)
-        end
+        importFromFile(fullPath)
       end
     end
   end
