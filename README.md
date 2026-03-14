@@ -1,4 +1,4 @@
-# SV_Harmony_API
+# SV Harmony API
 
 A file-based bridge API that extends Synthesizer V Studio's Lua scripting interface, enabling bidirectional communication between SV and external programs through a pseudo-bus (local JSON files).
 
