@@ -16,8 +16,8 @@ The system is split into two scripts:
 
 | Script | Purpose |
 |--------|---------|
-| **Hormony Bridge** (`HormonyBridge.lua`) | Runtime toggle: click once to start the loop, click again to stop. No UI dialogs. |
-| **Hormony Settings** (`HormonySettings.lua`) | Configuration UI: set update interval, working directory, etc. Saves to `Hormony_Config.json`. |
+| **Hormony Bridge** (`HormonyBridge.lua`) | Runtime: starts the bridge loop on click. No UI dialogs. |
+| **Hormony Settings** (`HormonySettings.lua`) | Configuration UI: update interval, work mode, working directory, session cleanup. Saves to `Hormony_Config.json`. |
 
 ### Why a Pseudo-Bus?
 
@@ -59,14 +59,15 @@ The bridge uses **read/write alternating**: odd ticks export, even ticks import.
 ## Features
 
 - **Bidirectional sync** -- export project state and import external modifications in real-time
-- **Toggle on/off** -- click to start, click again to stop (no UI dialogs during runtime)
+- **Work modes** -- Full (alternating export/import), Export Only, or Import Only (configurable in Settings)
+- **Session cleanup** -- stale sessions auto-detected and removable via Settings checkbox
 - **SVP-compatible JSON format** -- output matches the official `.svp` file structure
 - **Full project coverage** -- notes, 8 parameter curves (pitchDelta, vibratoEnv, loudness, tension, breathiness, voicing, gender, toneShift), tempo, time signatures, mixer settings, render config
 - **Zero dependencies** -- includes a built-in pure-Lua JSON encoder/decoder
 - **Session management** -- UUID-based sessions with auto-expiry, tracked in `Hormony_Session.json`
 - **Field-level diff import** -- only modifies notes/parameters that actually changed
 - **Change detection** -- only applies imports when file content actually changes
-- **Configurable** -- update interval and working directory via the Settings script
+- **Configurable** -- update interval, work mode, and working directory via the Settings script
 - **Localization** -- UI supports English and Simplified Chinese
 
 ## Requirements
@@ -94,11 +95,20 @@ The bridge uses **read/write alternating**: odd ticks export, even ticks import.
 
 1. **Save your project** (`Ctrl+S`) before running the bridge. The script reads the `.svp` file on disk to extract voice library (database) and `systemPitchDelta` data that are not accessible through the scripting API.
 
-2. **(Optional) Configure settings**: From the **Scripts** menu, select **Hormony Settings** to set the update interval and working directory. Settings are saved to `Hormony_Config.json`.
+2. **(Optional) Configure settings**: From the **Scripts** menu, select **Hormony Settings** to set the update interval, work mode, and working directory. Settings are saved to `Hormony_Config.json`.
+
+   **Work modes:**
+   | Mode | Behavior | Use case |
+   |------|----------|----------|
+   | **Full** (default) | Alternating export/import (odd tick = export, even tick = import) | Normal bidirectional workflow |
+   | **Export Only** | Export every tick, no import | Read-only external tools (monitoring, analysis) |
+   | **Import Only** | Import every tick, no export | One-way external control |
+
+   > **Note:** Export Only / Import Only should only be used if the external script requires it or you know what you are doing. The default Full mode is recommended for most use cases.
 
 3. **Start the bridge**: From the **Scripts** menu, select **Hormony Bridge**. The loop starts immediately (no dialog). The hormony working directory will be created automatically if needed.
 
-4. **Stop the bridge**: Click **Hormony Bridge** again. The script detects the running loop via a lock file (`.hormony_running`) and stops it.
+4. **Stop the bridge**: The bridge runs until SV stops the script (e.g., closing SV, rescanning scripts, or running another script). There is no toggle mechanism -- the loop simply runs until interrupted.
 
 5. **For external program integration**, write your tool to:
    - Read `Hormony_Session.json` to discover the active session UUID and file paths
@@ -107,7 +117,16 @@ The bridge uses **read/write alternating**: odd ticks export, even ticks import.
 
 > **WARNING: Switching .svp projects while a session is running**
 >
-> You **must** stop the bridge (click Hormony Bridge to toggle off) before opening or switching to a different `.svp` project. The session is bound to the project that was active when it started. If you switch projects without stopping first, the bridge will continue exporting/importing against the wrong project context. The resulting behavior is undefined -- you have been warned.
+> You **must** stop the bridge before opening or switching to a different `.svp` project. The session is bound to the project that was active when it started. If you switch projects without stopping first, the bridge will continue exporting/importing against the wrong project context. The resulting behavior is undefined -- you have been warned.
+
+### Session Cleanup
+
+Over time, stale sessions and orphan bridge files can accumulate in the hormony working directory. To clean them up, open **Hormony Settings** and check the **Clean Sessions** checkbox before clicking OK.
+
+Cleanup rules:
+- Sessions with `state == "stopped"` are removed immediately, along with their bridge files.
+- Sessions with `state == "running"` that have not updated their heartbeat in **>60 seconds** are considered dead and removed, along with their bridge files.
+- After session cleanup, all `*_out.json` / `*_in.json` files in the working directory are scanned. Any files whose UUID does not belong to a surviving session are deleted as orphans.
 
 ### Bridge File Location
 
@@ -168,8 +187,8 @@ The bridge produces JSON structurally identical to the official `.svp` format. T
 ## Project Structure
 
 ```
-HormonyBridge.lua          # Runtime bridge (toggle on/off)
-HormonySettings.lua        # Settings UI (persists to Hormony_Config.json)
+HormonyBridge.lua          # Runtime bridge (starts loop on click, no UI)
+HormonySettings.lua        # Settings UI (interval, work mode, working dir, session cleanup)
 Test_Loop.lua              # Proof-of-concept file-polling loop
 test_io.lua                # Basic file I/O validation test
 LICENSE.txt                # ALE 1.1 + GPL v3.0 dual license

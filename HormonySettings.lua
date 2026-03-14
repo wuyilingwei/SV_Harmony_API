@@ -21,7 +21,23 @@ function getTranslations(langCode)
       {"Settings saved.", "设置已保存。"},
       {"Update Interval", "更新间隔"},
       {"Working Directory", "工作目录"},
-      {"Reset to Default", "重置为默认"},
+      {"Work Mode", "工作模式"},
+      {"Full (Export + Import)", "全工 (导出 + 导入)"},
+      {"Export Only", "仅导出"},
+      {"Import Only", "仅导入"},
+      {"Clean Sessions", "清理会话"},
+      {"Sessions cleaned.", "会话已清理。"},
+      {"No sessions to clean.", "没有需要清理的会话。"},
+      {"Cannot get system time. Session cleanup skipped.", "无法获取系统时间，跳过会话清理。"},
+      {"Removed sessions: ", "已移除会话: "},
+      {"Removed orphan file groups: ", "已移除孤立文件组: "},
+      {"Configure the Hormony bridge runtime parameters.", "配置 Hormony 桥接运行参数。"},
+      {"These settings are saved to Hormony_Config.json and read by the bridge script.", "这些设置保存在 Hormony_Config.json 中，由桥接脚本读取。"},
+      {"[i] Full mode uses read/write alternating: full cycle = 2 x interval.\n    For large projects, use 3s or slower.", "[i] 全工模式使用读/写交替：完整周期 = 2 × 间隔。\n    对于大型项目，建议使用 3 秒或更慢的间隔。"},
+      {"[!] Use Export Only / Import Only only if your external script requires it\n    or you know exactly what you are doing. Default should be Full.", "[!] 仅在外部脚本需要时才使用"仅导出"/"仅导入"，\n    或者你清楚自己在做什么。默认应使用"全工"模式。"},
+      {"Cannot access hormony working directory:", "无法访问 Hormony 工作目录："},
+      {"Please create this directory manually and try again.", "请手动创建该目录后重试。"},
+      {"Failed to write config file:", "无法写入配置文件："},
     }
   end
   return {}
@@ -75,7 +91,7 @@ function json.encode(val)
       end
       return "[" .. table.concat(parts, ",") .. "]"
     elseif next(val) == nil then
-      return "{}"
+      return "[]"
     else
       local parts = {}
       for k, v in pairs(val) do
@@ -225,6 +241,7 @@ end
 -- Config file read/write
 -- ==========================================
 local CONFIG_FILE_PATH = HORMONY_DIR .. "Hormony_Config.json"
+local SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
 
 -- Interval options (must match the runtime script)
 local INTERVAL_OPTIONS = {
@@ -235,10 +252,18 @@ local INTERVAL_OPTIONS = {
   { label = "0.5s", ms = 500 },
 }
 
+-- Work mode options
+local WORK_MODE_OPTIONS = {
+  { label = "Full (Export + Import)", value = "full" },
+  { label = "Export Only",           value = "export" },
+  { label = "Import Only",          value = "import" },
+}
+
 -- Default config values
 local DEFAULT_CONFIG = {
-  interval = 1000,        -- ms
+  interval = 1000,
   hormonyDir = HORMONY_DIR,
+  workMode = "full",
   scriptVersion = SCRIPT_VERSION,
 }
 
@@ -264,14 +289,130 @@ local function writeConfig(cfg)
 end
 
 -- ==========================================
+-- Session cleanup
+-- Rules:
+--   1. state == "stopped" → remove session + delete bridge files
+--   2. state == "running" and no heartbeat for > 60s → remove (dead process) + delete bridge files
+--   3. After removing sessions, scan hormony dir for *_out.json / *_in.json
+--      not claimed by any surviving session → delete those orphan files
+-- ==========================================
+local function getTimestamp()
+  local ok, t = pcall(os.time)
+  if ok and t then return t end
+  return 0
+end
+
+local function readSessionFile()
+  local f = io.open(SESSION_FILE_PATH, "r")
+  if not f then return {} end
+  local content = f:read("*a")
+  f:close()
+  if not content or content == "" then return {} end
+  local ok, data = pcall(function() return json.decode(content) end)
+  if ok and type(data) == "table" then return data end
+  return {}
+end
+
+local function writeSessionFile(sessions)
+  local f = io.open(SESSION_FILE_PATH, "w")
+  if not f then return false end
+  f:write(json.encode(sessions))
+  f:close()
+  return true
+end
+
+-- Delete bridge files for a session
+local function deleteBridgeFiles(s)
+  if s.sessionId then
+    local outPath = HORMONY_DIR .. s.sessionId .. "_out.json"
+    local inPath  = HORMONY_DIR .. s.sessionId .. "_in.json"
+    os.remove(outPath)
+    os.remove(inPath)
+  end
+end
+
+-- List all *_out.json and *_in.json files in hormony dir
+-- Returns a table of { uuid = true } for each uuid found
+local function listBridgeFileUUIDs()
+  local uuids = {}
+  -- Use dir command to list files (Windows)
+  local dirPath = HORMONY_DIR:gsub("/", "\\")
+  local cmd = 'dir /b "' .. dirPath .. '" 2>nul'
+  local pipe = io.popen(cmd)
+  if not pipe then return uuids end
+  for line in pipe:lines() do
+    -- Match {uuid}_out.json or {uuid}_in.json
+    local uuid = line:match("^(.+)_out%.json$") or line:match("^(.+)_in%.json$")
+    if uuid then
+      uuids[uuid] = true
+    end
+  end
+  pipe:close()
+  return uuids
+end
+
+local function cleanSessions()
+  local sessions = readSessionFile()
+  local now = getTimestamp()
+  if now == 0 then return -1, 0 end -- cannot get time
+
+  -- Phase 1: clean sessions
+  local cleaned = {}
+  local removedSessions = 0
+  for _, s in ipairs(sessions) do
+    local dominated = false
+    if s.state == "stopped" then
+      dominated = true
+    elseif s.state == "running" then
+      local age = now - (s.timestamp or 0)
+      if age > 60 then
+        dominated = true
+      end
+    end
+    if dominated then
+      deleteBridgeFiles(s)
+      removedSessions = removedSessions + 1
+    else
+      table.insert(cleaned, s)
+    end
+  end
+
+  if removedSessions > 0 then
+    writeSessionFile(cleaned)
+  end
+
+  -- Phase 2: scan for orphan bridge files not claimed by any surviving session
+  local knownUUIDs = {}
+  for _, s in ipairs(cleaned) do
+    if s.sessionId then
+      knownUUIDs[s.sessionId] = true
+    end
+  end
+
+  local fileUUIDs = listBridgeFileUUIDs()
+  local removedFiles = 0
+  for uuid, _ in pairs(fileUUIDs) do
+    if not knownUUIDs[uuid] then
+      local outPath = HORMONY_DIR .. uuid .. "_out.json"
+      local inPath  = HORMONY_DIR .. uuid .. "_in.json"
+      os.remove(outPath)
+      os.remove(inPath)
+      removedFiles = removedFiles + 1
+    end
+  end
+
+  return removedSessions, removedFiles
+end
+
+-- ==========================================
 -- Main: Settings UI
 -- ==========================================
 function main()
   local dirOk = ensureHormonyDir()
   if not dirOk then
     SV:showMessageBox("Error",
-      "Cannot access hormony working directory:\n" .. HORMONY_DIR
-      .. "\n\nPlease create this directory manually and try again.")
+      SV:T("Cannot access hormony working directory:") .. "\n" .. HORMONY_DIR
+      .. "\n\n" .. SV:T("Please create this directory manually and try again."))
     SV:finish()
     return
   end
@@ -280,30 +421,50 @@ function main()
   local cfg = readConfig() or {}
   local currentInterval = cfg.interval or DEFAULT_CONFIG.interval
   local currentDir = cfg.hormonyDir or DEFAULT_CONFIG.hormonyDir
+  local currentWorkMode = cfg.workMode or DEFAULT_CONFIG.workMode
 
   -- Find the matching interval index for the ComboBox default
   local intervalDefault = 3  -- fallback to "1s" (index 3, 0-based)
   for idx, opt in ipairs(INTERVAL_OPTIONS) do
     if opt.ms == currentInterval then
-      intervalDefault = idx - 1  -- 0-based
+      intervalDefault = idx - 1
       break
     end
   end
 
-  -- Build interval choice labels
+  -- Find the matching work mode index
+  local workModeDefault = 0  -- fallback to "full"
+  for idx, opt in ipairs(WORK_MODE_OPTIONS) do
+    if opt.value == currentWorkMode then
+      workModeDefault = idx - 1
+      break
+    end
+  end
+
+  -- Build choice labels
   local intervalChoices = {}
   for _, opt in ipairs(INTERVAL_OPTIONS) do
     table.insert(intervalChoices, opt.label)
   end
 
+  local workModeChoices = {}
+  for _, opt in ipairs(WORK_MODE_OPTIONS) do
+    table.insert(workModeChoices, SV:T(opt.label))
+  end
+
+  -- Count current sessions for display
+  local sessions = readSessionFile()
+  local sessionInfo = #sessions .. " session(s) in Hormony_Session.json"
+
   local form = {
     title = SV:T("Hormony Settings"),
     message = "Hormony v" .. SCRIPT_VERSION
-      .. "\n\nConfigure the Hormony bridge runtime parameters."
-      .. "\nThese settings are saved to Hormony_Config.json and read by the bridge script."
-      .. "\n\nCurrent config file: " .. CONFIG_FILE_PATH
-      .. "\n\n[i] Loop Mode uses read/write alternating: full cycle = 2 x interval."
-      .. "\n    For large projects, use 3s or slower.",
+      .. "\n\n" .. SV:T("Configure the Hormony bridge runtime parameters.")
+      .. "\n" .. SV:T("These settings are saved to Hormony_Config.json and read by the bridge script.")
+      .. "\n\nConfig: " .. CONFIG_FILE_PATH
+      .. "\nSessions: " .. sessionInfo
+      .. "\n\n" .. SV:T("[i] Full mode uses read/write alternating: full cycle = 2 x interval.\n    For large projects, use 3s or slower.")
+      .. "\n\n" .. SV:T("[!] Use Export Only / Import Only only if your external script requires it\n    or you know exactly what you are doing. Default should be Full."),
     buttons = "OkCancel",
     widgets = {
       {
@@ -314,10 +475,23 @@ function main()
         default = intervalDefault
       },
       {
+        name = "workMode",
+        type = "ComboBox",
+        label = SV:T("Work Mode"),
+        choices = workModeChoices,
+        default = workModeDefault
+      },
+      {
         name = "hormonyDir",
         type = "TextBox",
         label = SV:T("Working Directory"),
         default = currentDir
+      },
+      {
+        name = "cleanSessions",
+        type = "CheckBox",
+        text = SV:T("Clean Sessions"),
+        default = false
       },
     }
   }
@@ -325,14 +499,19 @@ function main()
   local results = SV:showCustomDialog(form)
   if results.status then
     -- Read user choices
-    local intervalIdx = results.answers.interval + 1  -- 0-based -> 1-based
+    local intervalIdx = results.answers.interval + 1
     local newInterval = DEFAULT_CONFIG.interval
     if INTERVAL_OPTIONS[intervalIdx] then
       newInterval = INTERVAL_OPTIONS[intervalIdx].ms
     end
 
+    local workModeIdx = results.answers.workMode + 1
+    local newWorkMode = DEFAULT_CONFIG.workMode
+    if WORK_MODE_OPTIONS[workModeIdx] then
+      newWorkMode = WORK_MODE_OPTIONS[workModeIdx].value
+    end
+
     local newDir = results.answers.hormonyDir or currentDir
-    -- Normalize directory path
     newDir = newDir:gsub("\\", "/")
     if newDir:sub(-1) ~= "/" then newDir = newDir .. "/" end
 
@@ -340,6 +519,7 @@ function main()
     local newCfg = {
       interval = newInterval,
       hormonyDir = newDir,
+      workMode = newWorkMode,
       scriptVersion = SCRIPT_VERSION,
     }
 
@@ -347,7 +527,27 @@ function main()
     if ok then
       SV:showMessageBox(SV:T("Hormony Settings"), SV:T("Settings saved."))
     else
-      SV:showMessageBox("Error", "Failed to write config file:\n" .. CONFIG_FILE_PATH)
+      SV:showMessageBox("Error", SV:T("Failed to write config file:") .. "\n" .. CONFIG_FILE_PATH)
+    end
+
+    -- Clean sessions if requested
+    if results.answers.cleanSessions then
+      local removedSessions, removedFiles = cleanSessions()
+      if removedSessions < 0 then
+        SV:showMessageBox(SV:T("Clean Sessions"),
+          SV:T("Cannot get system time. Session cleanup skipped."))
+      elseif removedSessions == 0 and removedFiles == 0 then
+        SV:showMessageBox(SV:T("Clean Sessions"), SV:T("No sessions to clean."))
+      else
+        local msg = SV:T("Sessions cleaned.")
+        if removedSessions > 0 then
+          msg = msg .. "\n" .. SV:T("Removed sessions: ") .. removedSessions
+        end
+        if removedFiles > 0 then
+          msg = msg .. "\n" .. SV:T("Removed orphan file groups: ") .. removedFiles
+        end
+        SV:showMessageBox(SV:T("Clean Sessions"), msg)
+      end
     end
   end
 

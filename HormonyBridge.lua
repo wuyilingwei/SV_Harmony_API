@@ -1,8 +1,8 @@
 -- HormonyBridge.lua
--- Hormony API — JSON Loop Bridge (Toggle On/Off)
--- Pure runtime script: click once to start loop, click again to stop.
+-- Hormony API — JSON Loop Bridge
+-- Pure runtime script: starts the loop on click, runs until SV stops scripts.
 -- No UI dialogs. Reads config from Hormony_Config.json (written by HormonySettings.lua).
--- Uses a lock file (.hormony_running) to detect running state across isolated script instances.
+-- Supports work modes: full (export+import), export only, import only.
 
 function getClientInfo()
   return {
@@ -323,8 +323,8 @@ end
 local HORMONY_DIR = resolveHormonyDir()
 local SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
 local CONFIG_FILE_PATH = HORMONY_DIR .. "Hormony_Config.json"
-local LOCK_FILE_PATH = HORMONY_DIR .. ".hormony_running"
 local currentSessionId = nil
+local workMode = "full" -- "full", "export", "import"
 local paramTypeNames = {
   "pitchDelta", "vibratoEnv", "loudness", "tension",
   "breathiness", "voicing", "gender", "toneShift"
@@ -481,19 +481,18 @@ end
 
 -- 清理过期 session
 -- 规则:
+--   state == "stopped" → 直接删除
 --   state == "running" 且 timestamp 距今 > 60 秒 → 删除（说明进程已死）
---   其他 state 且 timestamp 距今 > 3600 秒 (60min) → 删除
 local function cleanupSessions(sessions)
   local now = getTimestamp()
   if now == 0 then return sessions end  -- 无法获取时间，跳过清理
 
   local cleaned = {}
   for _, s in ipairs(sessions) do
-    local age = now - (s.timestamp or 0)
-    if s.state == "running" and age > 60 then
+    if s.state == "stopped" then
+      -- 跳过（删除）：已停止的 session
+    elseif s.state == "running" and (now - (s.timestamp or 0)) > 60 then
       -- 跳过（删除）：running 状态但超过 1 分钟没更新
-    elseif s.state ~= "running" and age > 3600 then
-      -- 跳过（删除）：非 running 状态超过 60 分钟
     else
       table.insert(cleaned, s)
     end
@@ -1373,10 +1372,11 @@ end
 -- {uuid}_in.json:  SV monitors for external changes, applies diffs
 -- All files in hormony/ working directory
 --
--- Alternating strategy:
---   odd tick  -> export
---   even tick -> import
--- Full read/write cycle = 2 x loopInterval
+-- Work modes:
+--   "full"   -> alternating export/import (odd tick export, even tick import)
+--   "export" -> export only (every tick)
+--   "import" -> import only (every tick)
+-- Full read/write cycle in "full" mode = 2 x loopInterval
 -- ==========================================
 local loopOutPath = ""
 local loopInPath  = ""
@@ -1384,28 +1384,21 @@ local loopInPath  = ""
 local loopTickCount = 0
 
 local function loopTick()
-  -- Check lock file: if deleted externally, stop gracefully
-  local lockCheck = io.open(LOCK_FILE_PATH, "r")
-  if not lockCheck then
-    isLoopModeActive = false
-    if currentSessionId then
-      updateSessionState(currentSessionId, "stopped")
-    end
-    SV:finish()
-    return
-  end
-  lockCheck:close()
-
   if not isLoopModeActive then return end
   
   loopTickCount = loopTickCount + 1
   
-  if loopTickCount % 2 == 1 then
-    -- odd tick: export (skip .svp re-read in loop mode, use cache)
+  if workMode == "export" then
     exportProjectModel(loopOutPath, true)
-  else
-    -- even tick: import
+  elseif workMode == "import" then
     importFromFile(loopInPath)
+  else
+    -- full mode: alternating
+    if loopTickCount % 2 == 1 then
+      exportProjectModel(loopOutPath, true)
+    else
+      importFromFile(loopInPath)
+    end
   end
   
   -- Update session timestamp every 20 ticks (reduce disk IO)
@@ -1417,42 +1410,7 @@ local function loopTick()
 end
 
 -- ==========================================
--- Lock file management
--- The lock file (.hormony_running) stores the session UUID of the
--- currently running loop. Since SV scripts are fully isolated
--- (no shared memory), this is the only way to coordinate start/stop.
--- ==========================================
-
--- Read lock file: returns session UUID string, or nil if not running
-local function readLockFile()
-  local f = io.open(LOCK_FILE_PATH, "r")
-  if not f then return nil end
-  local content = f:read("*a")
-  f:close()
-  if content and content ~= "" then
-    return content:match("^%S+")  -- first token = UUID
-  end
-  return nil
-end
-
--- Write lock file with session UUID
-local function writeLockFile(uuid)
-  local f = io.open(LOCK_FILE_PATH, "w")
-  if not f then return false end
-  f:write(uuid)
-  f:close()
-  return true
-end
-
--- Delete lock file
-local function deleteLockFile()
-  os.remove(LOCK_FILE_PATH)
-end
-
--- ==========================================
--- Main: Toggle On/Off (no UI dialogs)
--- Click once -> start loop
--- Click again -> stop loop (via lock file)
+-- Main: Start loop (no UI dialogs)
 -- ==========================================
 function main()
   -- Ensure hormony working directory is accessible
@@ -1465,20 +1423,6 @@ function main()
     return
   end
 
-  -- Check if a loop is already running (lock file exists)
-  local runningUUID = readLockFile()
-  if runningUUID then
-    -- STOP: delete lock file, update session state
-    -- The running loop instance will detect the missing lock file on its next tick
-    -- and stop itself gracefully.
-    deleteLockFile()
-    updateSessionState(runningUUID, "stopped")
-    SV:finish()
-    return
-  end
-
-  -- START: read config, register session, create lock file, begin loop
-
   -- Load config from Hormony_Config.json (written by HormonySettings.lua)
   local cfg = readConfig()
   if cfg then
@@ -1486,11 +1430,12 @@ function main()
       loopInterval = cfg.interval
     end
     if cfg.hormonyDir and type(cfg.hormonyDir) == "string" and cfg.hormonyDir ~= "" then
-      -- Allow config to override the working directory
       HORMONY_DIR = cfg.hormonyDir
       SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
       CONFIG_FILE_PATH = HORMONY_DIR .. "Hormony_Config.json"
-      LOCK_FILE_PATH = HORMONY_DIR .. ".hormony_running"
+    end
+    if cfg.workMode and (cfg.workMode == "full" or cfg.workMode == "export" or cfg.workMode == "import") then
+      workMode = cfg.workMode
     end
   end
 
@@ -1503,30 +1448,25 @@ function main()
   local uuid, outPath, inPath = registerSession()
   currentSessionId = uuid
 
-  -- Write lock file
-  if not writeLockFile(uuid) then
-    SV:showMessageBox("Error", "Failed to create lock file:\n" .. LOCK_FILE_PATH)
-    updateSessionState(uuid, "stopped")
-    SV:finish()
-    return
+  -- Initial export to {uuid}_out.json
+  if workMode ~= "import" then
+    exportProjectModel(outPath)
   end
 
-  -- Initial export to {uuid}_out.json
-  exportProjectModel(outPath)
-
   -- Create {uuid}_in.json with current project data (establishes diff baseline)
-  svpFileCache = nil  -- rebuild for clean model
-  local initModel = buildOfficialLikeFromModel()
-  if initModel then
-    local initJson = json.encode(initModel)
-    local f = io.open(inPath, "w")
-    if f then
-      f:write(initJson)
-      f:close()
+  if workMode ~= "export" then
+    svpFileCache = nil  -- rebuild for clean model
+    local initModel = buildOfficialLikeFromModel()
+    if initModel then
+      local initJson = json.encode(initModel)
+      local f = io.open(inPath, "w")
+      if f then
+        f:write(initJson)
+        f:close()
+      end
+      lastImportedContents = initJson
+      lastImportedData = json.decode(initJson)
     end
-    -- Set diff baseline
-    lastImportedContents = initJson
-    lastImportedData = json.decode(initJson)
   end
 
   -- Start loop (silent, no popups)
