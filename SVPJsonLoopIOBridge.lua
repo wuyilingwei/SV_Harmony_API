@@ -6,7 +6,7 @@
 function getClientInfo()
   return {
     name = SV:T("Hormony API"),
-    author = "User",
+    author = "Wuyilingwei",
     versionNumber = 1,
     minEditorVersion = 65537
   }
