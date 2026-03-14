@@ -1328,23 +1328,21 @@ local function applyProjectModel(snap)
       track:setName(trackData.name)
     end
     
-    -- 更新 mainGroup
-    if trackData.mainGroup and track:getNumGroups() > 0 then
-      local groupRef = track:getGroupReference(1)
-      local group = groupRef:getTarget()
-      local newNotes = trackData.mainGroup.notes or {}
-      local oldNotes = oldTrackData and oldTrackData.mainGroup and oldTrackData.mainGroup.notes or {}
+    -- 辅助函数：对一个已知的 group 对象应用 groupData 中的音符和参数
+    local function applyGroupData(group, groupData, oldGroupData)
+      local newNotes = groupData.notes or {}
+      local oldNotes = oldGroupData and oldGroupData.notes or {}
       local currentNoteCount = group:getNumNotes()
       local newNoteCount = #newNotes
-      
+
       -- 逐音符字段级 diff
       local minCount = math.min(currentNoteCount, newNoteCount)
       for k = 1, minCount do
         local note = group:getNote(k)
-        local oldNoteData = oldNotes[k]  -- 可能为 nil（首次导入时）
+        local oldNoteData = oldNotes[k]
         diffUpdateNote(note, newNotes[k], oldNoteData)
       end
-      
+
       -- 新增音符（JSON 中有、当前工程中没有）
       if newNoteCount > currentNoteCount then
         for k = currentNoteCount + 1, newNoteCount do
@@ -1362,17 +1360,61 @@ local function applyProjectModel(snap)
           group:addNote(newNote)
         end
       end
-      
+
       -- 删除多余音符（当前工程中有、JSON 中没有）
       if currentNoteCount > newNoteCount then
         for k = currentNoteCount, newNoteCount + 1, -1 do
           group:removeNote(k)
         end
       end
-      
+
       -- 参数曲线 diff
-      local oldParams = oldTrackData and oldTrackData.mainGroup and oldTrackData.mainGroup.parameters
-      diffUpdateParameters(group, trackData.mainGroup.parameters, oldParams)
+      local oldParams = oldGroupData and oldGroupData.parameters
+      diffUpdateParameters(group, groupData.parameters, oldParams)
+    end
+
+    -- 更新 mainGroup
+    if trackData.mainGroup and track:getNumGroups() > 0 then
+      local groupRef = track:getGroupReference(1)
+      local group = groupRef:getTarget()
+      local oldMainGroup = oldTrackData and oldTrackData.mainGroup
+      applyGroupData(group, trackData.mainGroup, oldMainGroup)
+    end
+
+    -- 更新 groups（额外组，j >= 2）
+    local newGroups = trackData.groups or {}
+    local oldGroups = oldTrackData and oldTrackData.groups or {}
+    local currentNumGroups = track:getNumGroups()
+
+    for j = 1, #newGroups do
+      local groupData = newGroups[j]
+      local oldGroupData = oldGroups[j]
+      local svGroupRef = nil
+
+      -- 优先按 UUID 在当前轨道中查找对应的 GroupReference（跳过 j=1 的 mainGroup）
+      if groupData.uuid and groupData.uuid ~= "" then
+        for gi = 2, currentNumGroups do
+          local ref = track:getGroupReference(gi)
+          local tgt = ref:getTarget()
+          if tgt:getUUID() == groupData.uuid then
+            svGroupRef = ref
+            break
+          end
+        end
+      end
+
+      -- UUID 未匹配时，按位置对应（gi = j+1，因为 j=1 对应 mainGroup）
+      if not svGroupRef then
+        local gi = j + 1
+        if gi <= currentNumGroups then
+          svGroupRef = track:getGroupReference(gi)
+        end
+      end
+
+      if svGroupRef then
+        local group = svGroupRef:getTarget()
+        applyGroupData(group, groupData, oldGroupData)
+      end
     end
   end
   
