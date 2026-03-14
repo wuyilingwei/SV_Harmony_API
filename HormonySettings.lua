@@ -3,7 +3,7 @@
 -- Persists configuration to Hormony_Config.json in the hormony working directory.
 -- The runtime bridge script (HormonyBridge.lua) reads this config on start.
 
-local SCRIPT_VERSION = "0.3.0"
+local SCRIPT_VERSION = "0.4.0"
 
 function getClientInfo()
   return {
@@ -33,8 +33,8 @@ function getTranslations(langCode)
       {"Removed orphan file groups: ", "已移除孤立文件组: "},
       {"Configure the Hormony bridge runtime parameters.", "配置 Hormony 桥接运行参数。"},
       {"These settings are saved to Hormony_Config.json and read by the bridge script.", "这些设置保存在 Hormony_Config.json 中，由桥接脚本读取。"},
-      {"[i] Full mode uses read/write alternating: full cycle = 2 x interval.\n    For large projects, use 3s or slower.", "[i] 全工模式使用读/写交替：完整周期 = 2 × 间隔。\n    对于大型项目，建议使用 3 秒或更慢的间隔。"},
-      {"[!] Use Export Only / Import Only only if your external script requires it\n    or you know exactly what you are doing. Default should be Full.", "[!] 仅在外部脚本需要时才使用「仅导出」/「仅导入」，\n    或者你清楚自己在做什么。默认应使用「全工」模式。"},
+      {"Full mode uses read/write alternating: full cycle = 2 x interval. For large projects, use 3s or slower.", "全工模式使用读/写交替：完整周期 = 2 × 间隔。对于大型项目，建议使用 3 秒或更慢的间隔。"},
+      {"Use Export Only / Import Only only if your external script requires it or you know exactly what you are doing. Default should be Full.", "仅在外部脚本需要时才使用「仅导出」/「仅导入」，\n    或者你清楚自己在做什么。默认应使用「全工」模式。"},
       {"Cannot access hormony working directory:", "无法访问 Hormony 工作目录："},
       {"Please create this directory manually and try again.", "请手动创建该目录后重试。"},
       {"Failed to write config file:", "无法写入配置文件："},
@@ -43,7 +43,7 @@ function getTranslations(langCode)
       {"Sessions: ", "会话数："},
       {" session(s) in Hormony_Session.json", " 个会话记录于 Hormony_Session.json"},
       {"End Detection Silence", "结尾检测静默"},
-      {"[i] End Detection Silence: if no notes exist for this duration\n    after the last note, the export range stops there.", "[i] 结尾检测静默：若最后一个音符之后超过此时长没有音符，\n    则导出范围到此为止。"},
+      {"End Detection Silence: if no notes exist for this duration after the last note, the export range stops there.", "结尾检测静默：若最后一个音符之后超过此时长没有音符，则导出范围到此为止。"},
     }
   end
   return {}
@@ -499,14 +499,14 @@ function main()
 
   local form = {
     title = SV:T("Hormony Settings"),
-    message = "Hormony v" .. SCRIPT_VERSION
+    message = "Hormony API v" .. SCRIPT_VERSION
       .. "\n\n" .. SV:T("Configure the Hormony bridge runtime parameters.")
       .. "\n" .. SV:T("These settings are saved to Hormony_Config.json and read by the bridge script.")
       .. "\n\n" .. SV:T("Config: ") .. CONFIG_FILE_PATH
       .. "\n" .. SV:T("Sessions: ") .. sessionInfo
-      .. "\n\n" .. SV:T("[i] Full mode uses read/write alternating: full cycle = 2 x interval.\n    For large projects, use 3s or slower.")
-      .. "\n\n" .. SV:T("[!] Use Export Only / Import Only only if your external script requires it\n    or you know exactly what you are doing. Default should be Full.")
-      .. "\n\n" .. SV:T("[i] End Detection Silence: if no notes exist for this duration\n    after the last note, the export range stops there."),
+      .. "\n\n" .. SV:T("Full mode uses read/write alternating: full cycle = 2 x interval. For large projects, use 3s or slower.")
+      .. "\n\n" .. SV:T("Use Export Only / Import Only only if your external script requires it or you know exactly what you are doing. Default should be Full.")
+      .. "\n\n" .. SV:T("End Detection Silence: if no notes exist for this duration after the last note, the export range stops there."),
     buttons = "OkCancel",
     widgets = {
       {
