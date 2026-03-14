@@ -1,12 +1,12 @@
 -- SVPJsonLoopIOBridge.lua
--- 官方 JSON 双缓冲环路 IO 桥接
--- 核心目标：为 Synthesizer V Studio 创建一个 JSON 格式的环路 IO 桥接脚本
+-- Hormony API — JSON 双缓冲环路桥接
+-- 核心目标：为 Synthesizer V Studio 创建一个 JSON 格式的环路桥接脚本
 -- 使用 SV 编辑器对象模型作为唯一数据源，完全兼容官方 .svp 中的 JSON 结构
 
 function getClientInfo()
   return {
-    name = SV:T("JSON Loop IO Bridge"),
-    category = "IO",
+    name = SV:T("Hormony API"),
+    category = "Hormony API",
     author = "User",
     versionNumber = 1,
     minEditorVersion = 65537
@@ -16,7 +16,7 @@ end
 function getTranslations(langCode)
   if langCode == "zh-cn" then
     return {
-      {"JSON Loop IO Bridge", "JSON 环路 IO 桥接"},
+      {"Hormony API", "Hormony API"},
       {"Select Operation Mode", "选择操作模式"},
       {"Export to JSON", "导出工程为 JSON"},
       {"Import from JSON", "从 JSON 导入"},
@@ -233,6 +233,40 @@ local function parse_value(str, pos)
         if ec == 'n' then s = s .. '\n'
         elseif ec == 'r' then s = s .. '\r'
         elseif ec == 't' then s = s .. '\t'
+        elseif ec == 'u' then
+          -- \uXXXX Unicode escape
+          local hex4 = str:sub(pos + 1, pos + 4)
+          pos = pos + 4
+          local code = tonumber(hex4, 16)
+          if code then
+            -- Check for surrogate pair
+            if code >= 0xD800 and code <= 0xDBFF then
+              -- High surrogate, expect \uXXXX low surrogate
+              if str:sub(pos + 1, pos + 2) == "\\u" then
+                local hex4lo = str:sub(pos + 3, pos + 6)
+                local lo = tonumber(hex4lo, 16)
+                if lo and lo >= 0xDC00 and lo <= 0xDFFF then
+                  pos = pos + 6
+                  code = 0x10000 + (code - 0xD800) * 1024 + (lo - 0xDC00)
+                end
+              end
+            end
+            -- Encode Unicode codepoint to UTF-8
+            if code <= 0x7F then
+              s = s .. string.char(code)
+            elseif code <= 0x7FF then
+              s = s .. string.char(192 + math.floor(code / 64), 128 + (code % 64))
+            elseif code <= 0xFFFF then
+              s = s .. string.char(224 + math.floor(code / 4096),
+                                   128 + math.floor(code / 64) % 64,
+                                   128 + (code % 64))
+            elseif code <= 0x10FFFF then
+              s = s .. string.char(240 + math.floor(code / 262144),
+                                   128 + math.floor(code / 4096) % 64,
+                                   128 + math.floor(code / 64) % 64,
+                                   128 + (code % 64))
+            end
+          end
         else s = s .. ec end
       else
         s = s .. cc
@@ -266,33 +300,246 @@ end
 -- 全局状态与配置
 -- ==========================================
 local isLoopModeActive = false
-local loopInterval = 1000 -- 每 1000 毫秒循环一次
-local externalFileContents = ""
-local fallbackBridgeFilePath = "C:/sv_bridge_fallback.json" 
+local loopInterval = 1000 -- 每 1000 毫秒循环一次（默认，可通过 UI 修改）
+local lastImportedContents = ""  -- 缓存 {uuid}_in.json 的上次内容，用于检测外部更改
+local HORMONY_DIR = "C:/Users/User/Documents/Dreamtonics/Synthesizer V Studio/hormony/"
+local SCRIPT_VERSION = "0.1.2"
+local SESSION_FILE_PATH = HORMONY_DIR .. "Hormony_Session.json"
+local currentSessionId = nil  -- 当前会话的 UUID
 local paramTypeNames = {
   "pitchDelta", "vibratoEnv", "loudness", "tension",
   "breathiness", "voicing", "gender", "toneShift"
 }
 
--- 获取安全的读写路径，处理中文路径问题
-local function getSafeBridgePath()
-  -- 尝试获取当前工程路径
+-- 更新频率选项（毫秒）
+local INTERVAL_OPTIONS = {
+  { label = "15s",  ms = 15000 },
+  { label = "5s",   ms = 5000 },
+  { label = "3s",   ms = 3000 },
+  { label = "1s",   ms = 1000 },
+  { label = "0.5s", ms = 500 },
+}
+
+-- ==========================================
+-- 工具函数：时间戳 与 UUIDv4
+-- ==========================================
+
+-- 获取 Unix 时间戳（秒），os.time 在 SV Lua 环境中可能不可用
+local function getTimestamp()
+  local ok, t = pcall(os.time)
+  if ok and t then return t end
+  -- 最终后备：返回 0（功能降级但不崩溃）
+  return 0
+end
+
+-- 生成 UUIDv4（纯 Lua，使用 math.random）
+-- 格式: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+local uuidSeeded = false
+local function generateUUIDv4()
+  if not uuidSeeded then
+    -- 用时间戳 + os.clock 混合做种子
+    local seed = getTimestamp()
+    local okClock, clk = pcall(os.clock)
+    if okClock and clk then
+      seed = seed + math.floor(clk * 1000000)
+    end
+    math.randomseed(seed)
+    uuidSeeded = true
+  end
+
+  local hex = "0123456789abcdef"
+  local function rh() local i = math.random(1, 16); return hex:sub(i, i) end
+
+  -- xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+  local parts = {}
+  for i = 1, 8 do parts[#parts+1] = rh() end
+  parts[#parts+1] = "-"
+  for i = 1, 4 do parts[#parts+1] = rh() end
+  parts[#parts+1] = "-4"
+  for i = 1, 3 do parts[#parts+1] = rh() end
+  parts[#parts+1] = "-"
+  -- y 位: 8, 9, a, b 中随机选一个
+  local yChars = {"8","9","a","b"}
+  parts[#parts+1] = yChars[math.random(1,4)]
+  for i = 1, 3 do parts[#parts+1] = rh() end
+  parts[#parts+1] = "-"
+  for i = 1, 12 do parts[#parts+1] = rh() end
+
+  return table.concat(parts)
+end
+
+-- ==========================================
+-- Hormony_Session 管理
+-- 文件位置: hormony/Hormony_Session.json
+-- 格式: JSON 数组，每个元素为一个 session 记录
+-- ==========================================
+
+-- session 记录的标准字段顺序
+local SESSION_KEY_ORDER = {
+  "svVersion", "scriptVersion", "sessionId",
+  "svpFilePath", "hormonyDir", "bridgeOutPath", "bridgeInPath",
+  "timestamp", "state"
+}
+
+-- 为从 JSON 解析回来的 session 记录重新附加 __key_order__
+local function ensureSessionOrdered(s)
+  if s and type(s) == "table" and not s["__key_order__"] then
+    s["__key_order__"] = SESSION_KEY_ORDER
+  end
+  return s
+end
+
+-- 读取 session 文件，返回 sessions 数组（可能为空）
+local function readSessionFile()
+  local f = io.open(SESSION_FILE_PATH, "r")
+  if not f then return {} end
+  local content = f:read("*a")
+  f:close()
+  if not content or content == "" then return {} end
+  local ok, data = pcall(function() return json.decode(content) end)
+  if ok and type(data) == "table" then
+    -- 为每条 session 记录重新附加字段顺序
+    for _, s in ipairs(data) do
+      ensureSessionOrdered(s)
+    end
+    return data
+  end
+  return {}
+end
+
+-- 写入 session 文件
+local function writeSessionFile(sessions)
+  local f = io.open(SESSION_FILE_PATH, "w")
+  if not f then return false end
+  f:write(json.encode(sessions))
+  f:close()
+  return true
+end
+
+-- 清理过期 session
+-- 规则:
+--   state == "running" 且 timestamp 距今 > 60 秒 → 删除（说明进程已死）
+--   其他 state 且 timestamp 距今 > 3600 秒 (60min) → 删除
+local function cleanupSessions(sessions)
+  local now = getTimestamp()
+  if now == 0 then return sessions end  -- 无法获取时间，跳过清理
+
+  local cleaned = {}
+  for _, s in ipairs(sessions) do
+    local age = now - (s.timestamp or 0)
+    if s.state == "running" and age > 60 then
+      -- 跳过（删除）：running 状态但超过 1 分钟没更新
+    elseif s.state ~= "running" and age > 3600 then
+      -- 跳过（删除）：非 running 状态超过 60 分钟
+    else
+      table.insert(cleaned, s)
+    end
+  end
+  return cleaned
+end
+
+-- 获取 SV 编辑器版本字符串
+local function getSVVersion()
+  local ok, info = pcall(function() return SV:getHostInfo() end)
+  if ok and info then
+    -- 优先使用 hostVersion 字符串（如 "1.11.2"）
+    if info.hostVersion then
+      return info.hostVersion
+    end
+    -- 回退：从 hostVersionNumber 解析
+    local vn = info.hostVersionNumber
+    if vn then
+      return string.format("%d.%d.%d",
+        math.floor(vn / 65536),
+        math.floor(vn / 256) % 256,
+        vn % 256)
+    end
+  end
+  return "unknown"
+end
+
+-- 注册新 session（Loop Mode 启动时调用）
+-- 返回 uuid, outPath, inPath
+local function registerSession()
+  local sessions = readSessionFile()
+  sessions = cleanupSessions(sessions)
+
+  local uuid = generateUUIDv4()
+  local outPath, inPath = getBridgePaths(uuid)
   local projPath = SV:getProject():getFileName()
-  local targetPath = "D:/sv_bridge.json"
-  
-  if projPath ~= "" then
-    -- 如果工程已保存，将 bridge 生成在工程同目录
-    targetPath = projPath:match("(.*[/\\])") .. "sv_bridge.json"
+
+  local session = {
+    __key_order__ = SESSION_KEY_ORDER,
+    svVersion     = getSVVersion(),
+    scriptVersion = SCRIPT_VERSION,
+    sessionId     = uuid,
+    svpFilePath   = projPath,
+    hormonyDir    = HORMONY_DIR,
+    bridgeOutPath = outPath,
+    bridgeInPath  = inPath,
+    timestamp     = getTimestamp(),
+    state         = "running"
+  }
+
+  table.insert(sessions, session)
+  writeSessionFile(sessions)
+  return uuid, outPath, inPath
+end
+
+-- 更新当前 session 的时间戳（每次 loopTick 时调用）
+local function updateSessionTimestamp(sessionId)
+  if not sessionId then return end
+  local sessions = readSessionFile()
+  sessions = cleanupSessions(sessions)
+
+  for _, s in ipairs(sessions) do
+    if s.sessionId == sessionId then
+      s.timestamp = getTimestamp()
+      break
+    end
   end
-  
-  -- 测试写权限，如果失败可能是包含无法处理的中文路径
-  local f = io.open(targetPath, "w")
+  writeSessionFile(sessions)
+end
+
+-- 更新当前 session 的 state（停止时调用）
+local function updateSessionState(sessionId, newState)
+  if not sessionId then return end
+  local sessions = readSessionFile()
+
+  for _, s in ipairs(sessions) do
+    if s.sessionId == sessionId then
+      s.state = newState
+      s.timestamp = getTimestamp()
+      break
+    end
+  end
+  writeSessionFile(sessions)
+end
+
+-- 确保 hormony 工作目录存在
+-- 返回 true 表示目录可用，false 表示无法创建/写入
+local function ensureHormonyDir()
+  -- 尝试在目录下写一个临时文件来测试可用性
+  local testPath = HORMONY_DIR .. ".hormony_test"
+  local f = io.open(testPath, "w")
   if f then
+    f:write("")
     f:close()
-    return targetPath
-  else
-    return fallbackBridgeFilePath
+    os.remove(testPath)
+    return true
   end
+  -- 目录可能不存在，尝试通过写文件隐式创建（Lua 标准库无 mkdir）
+  -- 如果 io.open 失败，说明目录不存在且无法创建
+  return false
+end
+
+-- 根据 UUID 生成 bridge 文件路径
+-- uuid: 会话 UUID
+-- 返回两个路径: outPath (SV -> 外部), inPath (外部 -> SV)
+local function getBridgePaths(uuid)
+  local outPath = HORMONY_DIR .. uuid .. "_out.json"
+  local inPath  = HORMONY_DIR .. uuid .. "_in.json"
+  return outPath, inPath
 end
 
 -- ==========================================
@@ -440,27 +687,44 @@ end
 -- systemPitchDelta 由引擎在加载时自动重新计算，导出时留空
 -- ==========================================
 local svpFileCache = nil  -- 缓存已解析的 .svp 数据，避免重复读取
+local svpLoadError = ""   -- 记录读取失败原因，用于提示
 
 local function loadSvpFile()
   if svpFileCache then return svpFileCache end
 
   local project = SV:getProject()
-  if not project then return nil end
+  if not project then
+    svpLoadError = "project is nil"
+    return nil
+  end
 
   local svpPath = project:getFileName()
-  if svpPath == "" then return nil end  -- 工程未保存
+  if svpPath == "" then
+    svpLoadError = "工程未保存，请先 Ctrl+S 保存工程"
+    return nil
+  end
 
   local f = io.open(svpPath, "r")
-  if not f then return nil end
+  if not f then
+    svpLoadError = "无法打开 .svp 文件（可能是中文路径问题）:\n" .. svpPath
+    return nil
+  end
 
   local content = f:read("*a")
   f:close()
 
-  if not content or content == "" then return nil end
+  if not content or content == "" then
+    svpLoadError = ".svp 文件内容为空"
+    return nil
+  end
 
   local ok, data = pcall(function() return json.decode(content) end)
-  if not ok or type(data) ~= "table" then return nil end
+  if not ok or type(data) ~= "table" then
+    svpLoadError = ".svp JSON 解析失败"
+    return nil
+  end
 
+  svpLoadError = ""  -- 成功
   svpFileCache = data
   return data
 end
@@ -486,6 +750,43 @@ local function getSvpSystemPitchDelta(trackIndex)
   if not track or not track.mainRef then return nil end
 
   return track.mainRef.systemPitchDelta
+end
+
+-- 从 .svp 数据中读取顶层 version 字段
+local function getSvpVersion()
+  local svp = loadSvpFile()
+  if svp and svp.version then return svp.version end
+  return 153  -- 默认值
+end
+
+-- 从 .svp 数据中读取指定轨道字段
+-- trackIndex: 1-based
+-- field: 字段名 (如 "renderEnabled", "dispOrder")
+-- default: 默认值
+local function getSvpTrackField(trackIndex, field, default)
+  local svp = loadSvpFile()
+  if not svp or not svp.tracks then return default end
+  local track = svp.tracks[trackIndex]
+  if not track then return default end
+  if track[field] ~= nil then return track[field] end
+  return default
+end
+
+-- 从 .svp 数据中读取指定轨道的 mixer 字段
+local function getSvpMixerField(trackIndex, field, default)
+  local svp = loadSvpFile()
+  if not svp or not svp.tracks then return default end
+  local track = svp.tracks[trackIndex]
+  if not track or not track.mixer then return default end
+  if track.mixer[field] ~= nil then return track.mixer[field] end
+  return default
+end
+
+-- 从 .svp 数据中读取 renderConfig
+local function getSvpRenderConfig()
+  local svp = loadSvpFile()
+  if svp and svp.renderConfig then return svp.renderConfig end
+  return nil
 end
 
 -- 构建 mainRef 数据
@@ -662,7 +963,8 @@ local function buildOfficialLikeFromModel()
 
     local mixerData = ordered(
       {"gainDecibel", "pan", "mute", "solo", "display"},
-      { gainDecibel = mixGain, pan = mixPan, mute = mixMute, solo = mixSolo, display = true }
+      { gainDecibel = mixGain, pan = mixPan, mute = mixMute, solo = mixSolo,
+        display = getSvpMixerField(i, "display", true) }
     )
 
     local trackData = ordered(
@@ -674,8 +976,8 @@ local function buildOfficialLikeFromModel()
           local ok, c = pcall(function() return track:getDisplayColor() end)
           return ok and c or "ff7db235"
         end)(),
-        dispOrder     = i - 1,
-        renderEnabled = false,
+        dispOrder     = getSvpTrackField(i, "dispOrder", i - 1),
+        renderEnabled = getSvpTrackField(i, "renderEnabled", false),
         mixer         = mixerData,
         groups        = {}
       }
@@ -719,35 +1021,53 @@ local function buildOfficialLikeFromModel()
   end
 
   -- renderConfig
-  -- 从工程文件名提取默认导出名
-  local projFileName = project:getFileName()
-  local renderFilename = ""
-  if projFileName ~= "" then
-    -- 提取不含路径和扩展名的文件名
-    renderFilename = projFileName:match("([^/\\]+)$") or ""
-    renderFilename = renderFilename:match("(.+)%.") or renderFilename
+  -- 优先从 .svp 源文件读取，否则从工程文件名推断默认值
+  local svpRenderCfg = getSvpRenderConfig()
+  local renderCfg
+  if svpRenderCfg then
+    renderCfg = ordered(
+      {"destination", "filename", "numChannels", "aspirationFormat",
+       "bitDepth", "sampleRate", "exportMixDown", "exportPitch"},
+      {
+        destination      = svpRenderCfg.destination or "",
+        filename         = svpRenderCfg.filename or "",
+        numChannels      = svpRenderCfg.numChannels or 1,
+        aspirationFormat = svpRenderCfg.aspirationFormat or "noAspiration",
+        bitDepth         = svpRenderCfg.bitDepth or 16,
+        sampleRate       = svpRenderCfg.sampleRate or 44100,
+        exportMixDown    = (function() if svpRenderCfg.exportMixDown ~= nil then return svpRenderCfg.exportMixDown else return true end end)(),
+        exportPitch      = (function() if svpRenderCfg.exportPitch ~= nil then return svpRenderCfg.exportPitch else return false end end)()
+      }
+    )
+  else
+    -- 回退：从工程文件名提取默认导出名
+    local projFileName = project:getFileName()
+    local renderFilename = ""
+    if projFileName ~= "" then
+      renderFilename = projFileName:match("([^/\\]+)$") or ""
+      renderFilename = renderFilename:match("(.+)%.") or renderFilename
+    end
+    renderCfg = ordered(
+      {"destination", "filename", "numChannels", "aspirationFormat",
+       "bitDepth", "sampleRate", "exportMixDown", "exportPitch"},
+      {
+        destination      = "",
+        filename         = renderFilename,
+        numChannels      = 1,
+        aspirationFormat = "noAspiration",
+        bitDepth         = 16,
+        sampleRate       = 44100,
+        exportMixDown    = true,
+        exportPitch      = false
+      }
+    )
   end
-
-  local renderCfg = ordered(
-    {"destination", "filename", "numChannels", "aspirationFormat",
-     "bitDepth", "sampleRate", "exportMixDown", "exportPitch"},
-    {
-      destination      = "",
-      filename         = renderFilename,
-      numChannels      = 1,
-      aspirationFormat = "noAspiration",
-      bitDepth         = 16,
-      sampleRate       = 44100,
-      exportMixDown    = true,
-      exportPitch      = false
-    }
-  )
 
   -- 顶层结构
   local snap = ordered(
     {"version", "time", "library", "tracks", "renderConfig"},
     {
-      version = 153,
+      version = getSvpVersion(),
       time    = ordered(
         {"meter", "tempo"},
         { meter = meterList, tempo = tempoList }
@@ -772,7 +1092,6 @@ local function exportProjectModel(path)
   if file then
     file:write(jsonStr)
     file:close()
-    externalFileContents = jsonStr
     return true
   else
     return false
@@ -780,78 +1099,206 @@ local function exportProjectModel(path)
 end
 
 -- ==========================================
--- 核心功能 2: 应用外部 JSON 到编辑器模型
+-- 核心功能 2: 应用外部 JSON 到编辑器模型（字段级 diff）
+-- 只修改实际发生变化的字段，避免全量覆盖
 -- ==========================================
-local function applyProjectModel(snap)
-  local project = SV:getProject()
-  if not project then return end
-  
-  if snap.tracks and type(snap.tracks) == "table" then
-    local currentTrackCount = project:getNumTracks()
-    local importTrackCount = #snap.tracks
-    
-    for i = 1, importTrackCount do
-      local trackData = snap.tracks[i]
-      local track
-      if i <= currentTrackCount then
-        track = project:getTrack(i)
-      else
-        track = SV:create("Track")
-        project:addTrack(track)
+
+-- 比较两个 flat points 数组是否相同 [x1,y1,x2,y2,...]
+local function pointsEqual(a, b)
+  if a == nil and b == nil then return true end
+  if a == nil or b == nil then return false end
+  if #a ~= #b then return false end
+  for i = 1, #a do
+    -- 浮点数比较：使用足够小的 epsilon
+    if type(a[i]) == "number" and type(b[i]) == "number" then
+      if math.abs(a[i] - b[i]) > 1e-9 then return false end
+    elseif a[i] ~= b[i] then
+      return false
+    end
+  end
+  return true
+end
+
+-- 对单个音符进行字段级 diff 更新
+-- note: SV Note 对象
+-- newData: 从 JSON 解析的音符数据表
+-- oldData: 上次导入时的音符数据（用于检测变化）
+local function diffUpdateNote(note, newData, oldData)
+  -- onset + duration: 比较后按需更新
+  local newOnset = newData.onset
+  local newDuration = newData.duration
+  if newOnset and newDuration then
+    if not oldData or newOnset ~= oldData.onset or newDuration ~= oldData.duration then
+      note:setTimeRange(newOnset, newDuration)
+    end
+  elseif newOnset and (not oldData or newOnset ~= oldData.onset) then
+    note:setOnset(newOnset)
+  elseif newDuration and (not oldData or newDuration ~= oldData.duration) then
+    note:setDuration(newDuration)
+  end
+
+  -- pitch
+  if newData.pitch and (not oldData or newData.pitch ~= oldData.pitch) then
+    note:setPitch(newData.pitch)
+  end
+
+  -- lyrics
+  if newData.lyrics and (not oldData or newData.lyrics ~= oldData.lyrics) then
+    note:setLyrics(newData.lyrics)
+  end
+
+  -- phonemes
+  if newData.phonemes ~= nil and (not oldData or newData.phonemes ~= oldData.phonemes) then
+    note:setPhonemes(newData.phonemes or "")
+  end
+
+  -- attributes (tF0Left, dF0Vbr, evenSyllableDuration 等)
+  -- 使用 setAttributes 进行部分更新，只传入变化的字段
+  if newData.systemAttributes then
+    local attrDiff = {}
+    local hasDiff = false
+    local oldSys = oldData and oldData.systemAttributes or {}
+
+    local sysFields = {"tF0Offset", "tF0Left", "tF0Right", "dF0Left", "dF0Right", "dF0Vbr"}
+    for _, field in ipairs(sysFields) do
+      local newVal = newData.systemAttributes[field]
+      if newVal ~= nil then
+        local oldVal = oldSys[field]
+        if oldVal == nil or math.abs(newVal - oldVal) > 1e-9 then
+          attrDiff[field] = newVal
+          hasDiff = true
+        end
       end
+    end
+
+    -- evenSyllableDuration (boolean)
+    local newESD = newData.systemAttributes.evenSyllableDuration
+    if newESD ~= nil and (oldSys.evenSyllableDuration == nil or newESD ~= oldSys.evenSyllableDuration) then
+      attrDiff.evenSyllableDuration = newESD
+      hasDiff = true
+    end
+
+    if hasDiff then
+      pcall(function() note:setAttributes(attrDiff) end)
+    end
+  end
+end
+
+-- 对单个组的参数曲线进行 diff 更新
+-- group: SV NoteGroup 对象
+-- newParams: 新的 parameters 数据表
+-- oldParams: 上次导入时的 parameters 数据表
+local function diffUpdateParameters(group, newParams, oldParams)
+  if not newParams then return end
+  
+  for _, paramType in ipairs(paramTypeNames) do
+    local newParamData = newParams[paramType]
+    if newParamData and newParamData.points then
+      local newPoints = newParamData.points
+      local oldPoints = oldParams and oldParams[paramType] and oldParams[paramType].points or {}
       
-      if trackData.name then track:setName(trackData.name) end
-      
-      -- 更新 Main Group 的音符
-      if trackData.mainGroup and trackData.mainGroup.notes then
-        -- 为简化，找到第一个组并重建音符
-        if track:getNumGroups() > 0 then
-          local groupRef = track:getGroupReference(1)
-          local group = groupRef:getTarget()
-          
-          -- 清空原有音符
-          local count = group:getNumNotes()
-          for k = count, 1, -1 do
-            group:removeNote(k)
-          end
-          
-          -- 添加新音符
-          for _, noteData in ipairs(trackData.mainGroup.notes) do
-            local newNote = SV:create("Note")
-            newNote:setTimeRange(noteData.onset, noteData.duration)
-            newNote:setPitch(noteData.pitch)
-            newNote:setLyrics(noteData.lyrics)
-            if noteData.phonemes and noteData.phonemes ~= "" then
-              newNote:setPhonemes(noteData.phonemes)
-            end
-            -- 可以附加其他 attributes 但为防止未知属性崩掉这里简化
-            group:addNote(newNote)
-          end
-          
-          -- 同步参数曲线
-          for _, paramType in ipairs(paramTypeNames) do
-            if trackData.mainGroup.parameters and trackData.mainGroup.parameters[paramType] then
-               local pAM = group:getParameter(paramType)
-               if pAM then
-                 pAM:removeAll() -- 清除此参数所有旧点
-                 local points = trackData.mainGroup.parameters[paramType].points
-                 if points then
-                   -- points 是一维数组 [x1, y1, x2, y2...]
-                   for pt_i = 1, #points, 2 do
-                     local blick = points[pt_i]
-                     local val = points[pt_i+1]
-                     if blick and val then
-                       pAM:add(blick, val)
-                     end
-                   end
-                 end
-               end
+      -- 只在 points 数组有差异时才更新
+      if not pointsEqual(newPoints, oldPoints) then
+        local pAM = group:getParameter(paramType)
+        if pAM then
+          pAM:removeAll()
+          for pt_i = 1, #newPoints, 2 do
+            local blick = newPoints[pt_i]
+            local val = newPoints[pt_i + 1]
+            if blick and val then
+              pAM:add(blick, val)
             end
           end
         end
       end
     end
   end
+end
+
+-- 缓存上次成功导入的解析后数据，用于字段级比较
+local lastImportedData = nil
+
+local function applyProjectModel(snap)
+  local project = SV:getProject()
+  if not project then return end
+  
+  if not snap.tracks or type(snap.tracks) ~= "table" then return end
+  
+  -- 创建新的 undo 记录，使用户可以 Ctrl+Z 撤销本次导入
+  project:newUndoRecord()
+  
+  local oldTracks = lastImportedData and lastImportedData.tracks or {}
+  local currentTrackCount = project:getNumTracks()
+  local importTrackCount = #snap.tracks
+  
+  for i = 1, importTrackCount do
+    local trackData = snap.tracks[i]
+    local oldTrackData = oldTracks[i]
+    local track
+    
+    if i <= currentTrackCount then
+      track = project:getTrack(i)
+    else
+      -- 新增轨道
+      track = SV:create("Track")
+      project:addTrack(track)
+    end
+    
+    -- 轨道名称
+    if trackData.name and (not oldTrackData or trackData.name ~= oldTrackData.name) then
+      track:setName(trackData.name)
+    end
+    
+    -- 更新 mainGroup
+    if trackData.mainGroup and track:getNumGroups() > 0 then
+      local groupRef = track:getGroupReference(1)
+      local group = groupRef:getTarget()
+      local newNotes = trackData.mainGroup.notes or {}
+      local oldNotes = oldTrackData and oldTrackData.mainGroup and oldTrackData.mainGroup.notes or {}
+      local currentNoteCount = group:getNumNotes()
+      local newNoteCount = #newNotes
+      
+      -- 逐音符字段级 diff
+      local minCount = math.min(currentNoteCount, newNoteCount)
+      for k = 1, minCount do
+        local note = group:getNote(k)
+        local oldNoteData = oldNotes[k]  -- 可能为 nil（首次导入时）
+        diffUpdateNote(note, newNotes[k], oldNoteData)
+      end
+      
+      -- 新增音符（JSON 中有、当前工程中没有）
+      if newNoteCount > currentNoteCount then
+        for k = currentNoteCount + 1, newNoteCount do
+          local noteData = newNotes[k]
+          local newNote = SV:create("Note")
+          newNote:setTimeRange(noteData.onset or 0, noteData.duration or 1)
+          newNote:setPitch(noteData.pitch or 60)
+          newNote:setLyrics(noteData.lyrics or "la")
+          if noteData.phonemes and noteData.phonemes ~= "" then
+            newNote:setPhonemes(noteData.phonemes)
+          end
+          if noteData.systemAttributes then
+            pcall(function() newNote:setAttributes(noteData.systemAttributes) end)
+          end
+          group:addNote(newNote)
+        end
+      end
+      
+      -- 删除多余音符（当前工程中有、JSON 中没有）
+      if currentNoteCount > newNoteCount then
+        for k = currentNoteCount, newNoteCount + 1, -1 do
+          group:removeNote(k)
+        end
+      end
+      
+      -- 参数曲线 diff
+      local oldParams = oldTrackData and oldTrackData.mainGroup and oldTrackData.mainGroup.parameters
+      diffUpdateParameters(group, trackData.mainGroup.parameters, oldParams)
+    end
+  end
+  
+  -- 缓存本次导入的数据用于下次 diff
+  lastImportedData = snap
 end
 
 local function importFromFile(path)
@@ -861,7 +1308,7 @@ local function importFromFile(path)
   local jsonStr = file:read("*a")
   file:close()
   
-  if jsonStr == externalFileContents then
+  if jsonStr == lastImportedContents then
     -- 文件没发生过实质性颠覆改变，忽略
     return false, "File not changed by external."
   end
@@ -870,7 +1317,7 @@ local function importFromFile(path)
   if type(snap) == "table" then
     applyProjectModel(snap)
     -- 更新内容防止死循环反弹
-    externalFileContents = jsonStr
+    lastImportedContents = jsonStr
     return true, "Import Success"
   else
     return false, "JSON decode failed."
@@ -878,37 +1325,86 @@ local function importFromFile(path)
 end
 
 -- ==========================================
--- 环路功能
+-- 环路功能（双文件架构）
+-- {uuid}_out.json: SV 持续将当前工程数据写入此文件
+-- {uuid}_in.json:  SV 监控此文件，检测到外部更改时应用到工程
+-- 所有文件位于 hormony/ 工作目录下
 -- ==========================================
+local loopOutPath = ""  -- 缓存路径，避免每 tick 重新计算
+local loopInPath  = ""
+
+local loopTickCount = 0  -- 计数器：用于降低 session 更新频率
+
 local function loopTick()
   if not isLoopModeActive then return end
   
-  local bridgePath = getSafeBridgePath()
+  -- 1. 检查 {uuid}_in.json 是否被外部工具修改，如有则导入
+  importFromFile(loopInPath)
   
-  -- 1. 尝试导入 (只在文件发生外部更改时才有效响应)
-  local imported, msg = importFromFile(bridgePath)
+  -- 2. 持续将当前 SV 工程状态写入 {uuid}_out.json
+  exportProjectModel(loopOutPath)
   
-  -- 2. 如果存在成功导入，说明外部写入了，我们在编辑器应用完毕后应当再把现在干净的格式导出
-  -- 或者即使没导入，也许编辑器内部自己有改变，我们就覆盖外面的文件
-  exportProjectModel(bridgePath)
+  -- 3. 定期更新 session 时间戳（每 10 个 tick 更新一次，减少磁盘 IO）
+  loopTickCount = loopTickCount + 1
+  if loopTickCount % 10 == 0 then
+    updateSessionTimestamp(currentSessionId)
+  end
   
   SV:setTimeout(loopInterval, loopTick)
 end
 
 function main()
-  local safePath = getSafeBridgePath()
+  -- 确保 hormony 工作目录可用
+  local dirOk = ensureHormonyDir()
+  local dirHint = ""
+  if not dirOk then
+    dirHint = "\n\n[!] 无法访问 hormony 工作目录: " .. HORMONY_DIR
+      .. "\n    请手动创建此目录后重试。"
+  end
+
+  -- 预先尝试加载 .svp 文件，生成提示信息
+  svpFileCache = nil
+  svpLoadError = ""
+  local svpData = loadSvpFile()
+  local svpHint = ""
+  if not svpData then
+    svpHint = "\n\n[!] " .. svpLoadError
+    svpHint = svpHint .. "\n    database（声库）和 systemPitchDelta（自动音高曲线）将为空。"
+  else
+    svpHint = "\n\n[i] 受限于脚本 API，database 和 systemPitchDelta 将从 .svp 源文件读取。"
+    svpHint = svpHint .. "\n    更改声库后请先保存工程（Ctrl+S）再导出。"
+  end
+
+  -- 构建频率选项标签
+  local intervalChoices = {}
+  for _, opt in ipairs(INTERVAL_OPTIONS) do
+    table.insert(intervalChoices, opt.label)
+  end
 
   local form = {
     title = SV:T("Select Operation Mode"),
-    message = "Target File: " .. safePath,
+    message = "Hormony v" .. SCRIPT_VERSION
+      .. "\nWorking directory: " .. HORMONY_DIR
+      .. "\nSession file: " .. SESSION_FILE_PATH
+      .. dirHint
+      .. svpHint
+      .. "\n\n[!] 大工程使用较高刷新频率（如 0.5s、1s）可能导致性能下降。"
+      .. "\n    建议大工程使用 3s 或更低的频率。",
     buttons = "OkCancel",
     widgets = {
       {
         name = "mode",
         type = "ComboBox",
         label = SV:T("Select Operation Mode"),
-        choices = {SV:T("Export to JSON"), SV:T("Import from JSON"), SV:T("Start Loop Mode")},
+        choices = {SV:T("Start Loop Mode"), SV:T("Export to JSON"), SV:T("Import from JSON")},
         default = 0
+      },
+      {
+        name = "interval",
+        type = "ComboBox",
+        label = "Update Interval",
+        choices = intervalChoices,
+        default = 3  -- 默认 1s
       }
     }
   }
@@ -916,38 +1412,98 @@ function main()
   local results = SV:showCustomDialog(form)
   if results.status then
     local mode = results.answers.mode
+    -- 读取用户选择的更新频率
+    local intervalIdx = results.answers.interval + 1  -- 0-based → 1-based
+    if INTERVAL_OPTIONS[intervalIdx] then
+      loopInterval = INTERVAL_OPTIONS[intervalIdx].ms
+    end
+
     if mode == 0 then
-      if exportProjectModel(safePath) then
-        local hints = "Export successful!\n" .. safePath
-        local svpPath = SV:getProject():getFileName()
-        if svpPath == "" then
-          hints = hints .. "\n\n[!] 工程未保存，database（声库）和 systemPitchDelta（自动音高曲线）为空。"
-          hints = hints .. "\n    请先保存工程（Ctrl+S）再导出以获取完整数据。"
-        else
-          hints = hints .. "\n\n[i] database（声库信息）已从 .svp 源文件读取。"
-          hints = hints .. "\n    如果更改了声库，请先保存工程再导出。"
-          hints = hints .. "\n[i] systemPitchDelta（自动音高曲线）已从 .svp 源文件读取。"
-          hints = hints .. "\n    此数据由引擎自动生成，导入后会重新计算。"
-        end
-        SV:showMessageBox("Success", hints)
-      else
-        SV:showMessageBox("Error", "Export failed for path:\n" .. safePath)
+      -- Loop Mode (default)
+      if not dirOk then
+        SV:showMessageBox("Error", "hormony 工作目录不可用，无法启动 Loop Mode。\n" .. HORMONY_DIR)
+        SV:finish()
+        return
       end
+
+      -- 1. 注册 session（生成 UUID 和 bridge 文件路径）
+      local uuid, outPath, inPath = registerSession()
+      currentSessionId = uuid
+
+      -- 2. 导出当前工程到 {uuid}_out.json
+      exportProjectModel(outPath)
+      
+      -- 3. 创建 {uuid}_in.json（用同样的当前工程数据初始化）
+      --    同时建立 diff 基线：lastImportedContents 和 lastImportedData
+      svpFileCache = nil  -- 重新构建以获取干净的模型
+      local initModel = buildOfficialLikeFromModel()
+      if initModel then
+        local initJson = json.encode(initModel)
+        local f = io.open(inPath, "w")
+        if f then
+          f:write(initJson)
+          f:close()
+        end
+        -- 设置 diff 基线
+        lastImportedContents = initJson
+        -- 解析一份干净的数据副本作为 diff 参照
+        lastImportedData = json.decode(initJson)
+      end
+      
+      -- 4. 启动循环
+      isLoopModeActive = true
+      loopOutPath = outPath
+      loopInPath  = inPath
+      loopTickCount = 0
+      SV:showMessageBox("Info",
+        "Loop Mode started.\n"
+        .. "Press 'Stop Scripts' in Synthesizer V to kill it.\n\n"
+        .. "Session ID: " .. uuid .. "\n"
+        .. "Update interval: " .. INTERVAL_OPTIONS[intervalIdx].label .. "\n\n"
+        .. "OUT (SV -> External):\n" .. outPath .. "\n\n"
+        .. "IN  (External -> SV):\n" .. inPath)
+      loopTick()
     elseif mode == 1 then
-      local ok, err_msg = importFromFile(safePath)
-      if ok then
-        SV:showMessageBox("Success", "Import successful!")
+      -- One-shot Export: 使用一次性 UUID 命名
+      if not dirOk then
+        SV:showMessageBox("Error", "hormony 工作目录不可用。\n" .. HORMONY_DIR)
+        SV:finish()
+        return
+      end
+      local uuid = generateUUIDv4()
+      local outPath = HORMONY_DIR .. uuid .. "_out.json"
+      if exportProjectModel(outPath) then
+        SV:showMessageBox("Success", "Export successful!\n" .. outPath)
       else
-        SV:showMessageBox("Info", "Import Info:\n" .. err_msg)
+        SV:showMessageBox("Error", "Export failed for path:\n" .. outPath)
       end
     elseif mode == 2 then
-      isLoopModeActive = true
-      SV:showMessageBox("Info", "Loop Mode started.\nPress 'Stop Scripts' in Synthesizer V to kill it.\nBridging to: " .. safePath)
-      loopTick()
+      -- One-shot Import: 让用户知道需要指定文件
+      -- 从 hormony 目录中读取最新的 *_in.json
+      if not dirOk then
+        SV:showMessageBox("Error", "hormony 工作目录不可用。\n" .. HORMONY_DIR)
+        SV:finish()
+        return
+      end
+      -- 提示用户输入要导入的文件名
+      local importPath = SV:showInputBox("Import", "请输入 hormony 目录下要导入的文件名\n（如 xxxxxxxx_in.json）:", "")
+      if importPath and importPath ~= "" then
+        local fullPath = HORMONY_DIR .. importPath
+        local ok, err_msg = importFromFile(fullPath)
+        if ok then
+          SV:showMessageBox("Success", "Import successful!\n" .. fullPath)
+        else
+          SV:showMessageBox("Info", "Import Info:\n" .. err_msg)
+        end
+      end
     end
   end
   
   if not isLoopModeActive then
+    -- 脚本结束时，如果有 session 则标记为 stopped
+    if currentSessionId then
+      updateSessionState(currentSessionId, "stopped")
+    end
     SV:finish()
   end
 end
