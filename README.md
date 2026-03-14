@@ -76,12 +76,13 @@ The bridge uses **read/write alternating**: odd ticks export, even ticks import.
 ## Requirements
 
 - **Synthesizer V Studio** v1.0.1+ (some features like `getMixer()` require v2.1.1+)
-- **Operating System**: Windows (fallback path uses `D:/`; path handling supports both `/` and `\`)
+- **Operating System**: Windows (path handling supports both `/` and `\`)
 - No external Lua installation or libraries required
 
 ## Installation
 
 1. Copy both scripts into your Synthesizer V Studio scripts directory:
+2. go to **Scripts > Open Scripts Folder**
    ```
    HormonyBridge.lua          (Hormony Bridge - runtime)
    HormonySettings.lua       (Hormony Settings - configuration)
@@ -92,7 +93,7 @@ The bridge uses **read/write alternating**: odd ticks export, even ticks import.
    ```
    or a subdirectory (e.g., `scripts/Utilities/`).
 
-2. In Synthesizer V Studio, go to **Scripts > Rescan** to detect the new scripts.
+3. In Synthesizer V Studio, go to **Scripts > Rescan** to detect the new scripts.
 
 ## Usage
 
@@ -182,9 +183,8 @@ The bridge produces JSON structurally identical to the official `.svp` format. T
 - **Latency**: Configurable polling interval (default 1s); full cycle is 2x interval due to read/write alternating
 - **Full export per tick**: The entire project is re-serialized every export cycle, not incremental deltas
 - **No file locking**: An external program could theoretically read a partially-written file
-- **Main group only**: Import only processes `mainGroup` of each track; additional groups are exported but not imported back
 - **Voice library**: Database info is read from the saved `.svp` file, not from the live editor. Changing the voice library requires saving the project first
-- **Song length**: Designed for songs up to ~10 minutes (parameter curve range covers ~3000 beats)
+- **Song length**: Designed for songs up to ~10 minutes (parameter curve range covers ~3000 beats) If your project exceeds this, you may need to increase the `maxBlick` constant in the code and ensure your external tool can handle the larger JSON files
 - **Project switching**: You must stop the session before switching `.svp` projects. Behavior is undefined otherwise
 
 ## Project Structure
